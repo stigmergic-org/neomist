@@ -1,0 +1,38 @@
+[package]
+name = "neomist"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy-primitives = "1.5"
+alloy = { version = "1.6", features = ["contract", "ens", "providers", "reqwest", "sol-types"] }
+axum = { version = "0.7", features = ["tokio", "http1"] }
+cid = "0.11"
+directories = "6.0"
+eyre = "0.6"
+flate2 = "1.0"
+hex = "0.4"
+helios = { git = "https://github.com/a16z/helios", branch = "master" }
+hickory-proto = "0.24"
+image = "0.25"
+base64 = "0.22"
+hyper = "1.6"
+hyper-util = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }
+url = "2.5"
+rustls = "0.23"
+rustls-pemfile = "2.2"
+tokio-rustls = "0.26"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sha1 = "0.10"
+tar = "0.4"
+xattr = "1.6"
+tao = "0.34"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = "0.21"

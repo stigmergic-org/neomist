@@ -1,0 +1,299 @@
+use std::fs;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use eyre::{Result, WrapErr};
+use flate2::read::GzDecoder;
+use hex::encode as hex_encode;
+use sha2::{Digest, Sha512};
+use tar::Archive;
+
+const KUBO_VERSION: &str = "v0.39.0";
+const IPFS_API_PORT: u16 = 5001;
+const MANAGED_GATEWAY_PORT: u16 = 58080;
+const KUBO_DIST_BASE: &str = "https://dist.ipfs.tech/kubo";
+
+pub async fn init_kubo(
+    http_client: reqwest::Client,
+    base_dir: PathBuf,
+) -> Result<(u16, Option<Child>)> {
+    tracing::info!("Starting IPFS (kubo)");
+    if check_existing_ipfs(&http_client).await {
+        let gateway_port = fetch_gateway_port(&http_client).await.unwrap_or(8080);
+        tracing::info!(
+            "Using existing IPFS on port {IPFS_API_PORT} (gateway {gateway_port})"
+        );
+        return Ok((gateway_port, None));
+    }
+
+    let (bin_dir, repo_dir, download_dir) = kubo_paths(&base_dir);
+    let ipfs_path = download_kubo(&http_client, &bin_dir, &download_dir).await?;
+    ensure_repo_initialized(&ipfs_path, &repo_dir)?;
+    update_gateway_config(&repo_dir, MANAGED_GATEWAY_PORT)?;
+
+    let child = start_kubo_daemon(&ipfs_path, &repo_dir)?;
+    wait_for_ipfs(&http_client).await?;
+    tracing::info!("Managed IPFS started (gateway {MANAGED_GATEWAY_PORT})");
+
+    Ok((MANAGED_GATEWAY_PORT, Some(child)))
+}
+
+async fn check_existing_ipfs(http_client: &reqwest::Client) -> bool {
+    let url = format!("http://127.0.0.1:{IPFS_API_PORT}/api/v0/version");
+    http_client
+        .post(url)
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
+async fn fetch_gateway_port(http_client: &reqwest::Client) -> Result<u16> {
+    let url = format!(
+        "http://127.0.0.1:{IPFS_API_PORT}/api/v0/config?arg=Addresses.Gateway"
+    );
+    let response: serde_json::Value = http_client
+        .post(url)
+        .send()
+        .await
+        .wrap_err("Failed to call IPFS config")?
+        .json()
+        .await
+        .wrap_err("Failed to decode IPFS config response")?;
+
+    let gateway = response
+        .get("Value")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    if let Some(port) = gateway.split("/tcp/").nth(1) {
+        if let Ok(port) = port.parse::<u16>() {
+            return Ok(port);
+        }
+    }
+
+    Ok(8080)
+}
+
+async fn wait_for_ipfs(http_client: &reqwest::Client) -> Result<()> {
+    let mut attempts = 0;
+    while attempts < 40 {
+        if check_existing_ipfs(http_client).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        attempts += 1;
+    }
+
+    Err(eyre::eyre!("Timed out waiting for IPFS API"))
+}
+
+async fn download_kubo(
+    http_client: &reqwest::Client,
+    bin_dir: &Path,
+    download_dir: &Path,
+) -> Result<PathBuf> {
+    let (os, arch) = kubo_platform_target()?;
+    let filename = format!("kubo_{KUBO_VERSION}_{os}-{arch}.tar.gz");
+    let checksum_name = format!("{filename}.sha512");
+
+    fs::create_dir_all(bin_dir).wrap_err("Failed to create kubo bin dir")?;
+    fs::create_dir_all(download_dir).wrap_err("Failed to create kubo download dir")?;
+
+    let ipfs_path = bin_dir.join("ipfs");
+    if ipfs_path.exists() {
+        if ipfs_path.is_file() {
+            return Ok(ipfs_path);
+        }
+        fs::remove_dir_all(&ipfs_path)
+            .wrap_err("Failed to remove stale kubo directory")?;
+    }
+
+    let checksum_url = format!("{KUBO_DIST_BASE}/{KUBO_VERSION}/{checksum_name}");
+    let checksum_text = http_client
+        .get(checksum_url)
+        .send()
+        .await
+        .wrap_err("Failed to fetch kubo checksum")?
+        .text()
+        .await
+        .wrap_err("Failed to read kubo checksum")?;
+
+    let expected_hash = checksum_text
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| eyre::eyre!("Checksum not found for {filename}"))?
+        .to_lowercase();
+
+    let tarball_url = format!("{KUBO_DIST_BASE}/{KUBO_VERSION}/{filename}");
+    let bytes = http_client
+        .get(tarball_url)
+        .send()
+        .await
+        .wrap_err("Failed to download kubo tarball")?
+        .bytes()
+        .await
+        .wrap_err("Failed to read kubo tarball")?;
+
+    let mut hasher = Sha512::new();
+    hasher.update(&bytes);
+    let actual_hash = hex_encode(hasher.finalize());
+    if actual_hash != expected_hash {
+        return Err(eyre::eyre!(
+            "Kubo checksum mismatch: expected {expected_hash}, got {actual_hash}"
+        ));
+    }
+
+    let tarball_path = download_dir.join(&filename);
+    fs::write(&tarball_path, &bytes).wrap_err("Failed to write kubo tarball")?;
+
+    let extract_dir = download_dir.join(format!("kubo_{KUBO_VERSION}_{os}-{arch}"));
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)
+            .wrap_err("Failed to clear kubo extract dir")?;
+    }
+    fs::create_dir_all(&extract_dir).wrap_err("Failed to create kubo extract dir")?;
+
+    let tar = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(tar);
+    archive
+        .unpack(&extract_dir)
+        .wrap_err("Failed to extract kubo archive")?;
+
+    let extracted_binary = find_ipfs_binary(&extract_dir)?;
+    fs::copy(&extracted_binary, &ipfs_path)
+        .wrap_err("Failed to install kubo binary")?;
+
+    set_ipfs_permissions(&ipfs_path)?;
+    Ok(ipfs_path)
+}
+
+fn set_ipfs_permissions(ipfs_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(ipfs_path)
+            .wrap_err("Failed to stat kubo binary")?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(ipfs_path, perms)
+            .wrap_err("Failed to set kubo permissions")?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if xattr::get(ipfs_path, "com.apple.quarantine")
+            .wrap_err("Failed to read kubo quarantine attribute")?
+            .is_some()
+        {
+            xattr::remove(ipfs_path, "com.apple.quarantine")
+                .wrap_err("Failed to remove kubo quarantine attribute")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_repo_initialized(ipfs_path: &Path, repo_dir: &Path) -> Result<()> {
+    if repo_dir.join("config").exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(repo_dir).wrap_err("Failed to create IPFS repo dir")?;
+    set_ipfs_permissions(ipfs_path)?;
+
+    let output = Command::new(ipfs_path)
+        .arg("init")
+        .env("IPFS_PATH", repo_dir)
+        .output()
+        .wrap_err("Failed to run kubo init")?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(eyre::eyre!(
+            "kubo init failed (status: {}). stdout: {} stderr: {}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
+}
+
+fn update_gateway_config(repo_dir: &Path, gateway_port: u16) -> Result<()> {
+    let config_path = repo_dir.join("config");
+    let contents = fs::read_to_string(&config_path).wrap_err("Failed to read kubo config")?;
+    let mut config: serde_json::Value = serde_json::from_str(&contents)
+        .wrap_err("Failed to parse kubo config")?;
+
+    config["Addresses"]["Gateway"] = serde_json::Value::String(
+        format!("/ip4/127.0.0.1/tcp/{gateway_port}"),
+    );
+
+    config["API"]["HTTPHeaders"] = serde_json::json!({
+        "Access-Control-Allow-Origin": ["https://webui.ipfs.io"],
+        "Access-Control-Allow-Methods": ["GET", "POST", "PUT"],
+        "Access-Control-Allow-Headers": ["X-Requested-With", "Content-Type"]
+    });
+
+    let updated = serde_json::to_string_pretty(&config)
+        .wrap_err("Failed to serialize kubo config")?;
+    fs::write(&config_path, updated).wrap_err("Failed to write kubo config")?;
+    Ok(())
+}
+
+fn start_kubo_daemon(ipfs_path: &Path, repo_dir: &Path) -> Result<Child> {
+    Command::new(ipfs_path)
+        .arg("daemon")
+        .env("IPFS_PATH", repo_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .wrap_err("Failed to start kubo daemon")
+}
+
+fn kubo_platform_target() -> Result<(String, String)> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        other => return Err(eyre::eyre!("Unsupported OS: {other}")),
+    };
+
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => return Err(eyre::eyre!("Unsupported arch: {other}")),
+    };
+
+    Ok((os.to_string(), arch.to_string()))
+}
+
+fn kubo_paths(base_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let ipfs_dir = base_dir.join("ipfs");
+    let bin_dir = ipfs_dir.join("bin");
+    let repo_dir = ipfs_dir.join("repo");
+    let download_dir = ipfs_dir.join("downloads");
+    (bin_dir, repo_dir, download_dir)
+}
+
+fn find_ipfs_binary(dir: &Path) -> Result<PathBuf> {
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir).wrap_err("Failed to read kubo extract dir")? {
+            let entry = entry.wrap_err("Failed to read kubo extract entry")?;
+            let path = entry.path();
+            if path.is_dir() {
+                if let Ok(found) = find_ipfs_binary(&path) {
+                    return Ok(found);
+                }
+            } else if path.file_name().map(|name| name == "ipfs").unwrap_or(false) {
+                return Ok(path);
+            }
+        }
+    }
+
+    Err(eyre::eyre!("IPFS binary not found after extraction"))
+}

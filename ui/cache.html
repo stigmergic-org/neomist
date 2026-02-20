@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NeoMist Cache</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f1ec;
+        --panel: #ffffff;
+        --text: #1f1a17;
+        --muted: #7a6f66;
+        --accent: #c96c2b;
+        --border: #e6ded6;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Alegreya Sans", "Iowan Old Style", "Palatino", serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .container {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 48px 24px 64px;
+      }
+
+      header {
+        margin-bottom: 24px;
+      }
+
+      h1 {
+        font-size: 32px;
+        margin: 0 0 8px;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .stats {
+        display: flex;
+        gap: 16px;
+        margin-top: 16px;
+      }
+
+      .stat {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 12px 16px;
+        min-width: 140px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow: 0 12px 24px rgba(31, 26, 23, 0.08);
+        padding: 16px 0;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 12px 20px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      th {
+        font-size: 13px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
+      tr:last-child td {
+        border-bottom: none;
+      }
+
+      .domain {
+        font-weight: 600;
+      }
+
+      .cid {
+        font-family: "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+        font-size: 12px;
+        color: var(--muted);
+        word-break: break-all;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .btn {
+        border: 2px solid transparent;
+        background: transparent;
+        color: var(--accent);
+        border-radius: 8px;
+        padding: 6px;
+        cursor: pointer;
+        font-size: 16px;
+        min-width: 32px;
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+
+      .btn-primary {
+        border-color: #3498db;
+        color: #3498db;
+      }
+
+      .btn-danger {
+        border-color: #e74c3c;
+        color: #e74c3c;
+      }
+
+      .btn-success {
+        border-color: #27ae60;
+        color: #27ae60;
+      }
+
+      .btn:hover::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        white-space: nowrap;
+        z-index: 1000;
+        margin-bottom: 4px;
+      }
+
+      .btn:hover::before {
+        content: '';
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 0;
+        height: 0;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 4px solid rgba(0, 0, 0, 0.8);
+        z-index: 1000;
+      }
+
+      .loading {
+        text-align: center;
+        color: var(--muted);
+        padding: 40px;
+      }
+
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 40px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>NeoMist Cache</h1>
+        <p>Cached .eth and .wei sites available on your node.</p>
+    <div class="stats">
+      <div class="stat"><strong id="cachedCount">-</strong> cached</div>
+      <div class="stat"><strong id="storageUsed">-</strong> used</div>
+    </div>
+
+    <div class="panel" style="margin-top: 20px; padding: 12px 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <strong>Latest checkpoints</strong>
+        <span style="color: var(--muted); font-size: 12px;">Most recent on the left</span>
+      </div>
+      <div id="checkpointRow" style="display: flex; gap: 12px; align-items: center; min-height: 40px;"></div>
+    </div>
+      </header>
+
+      <div class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Latest CID</th>
+              <th>Cached</th>
+              <th>Auto-seed</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="cacheTable">
+            <tr><td colspan="5" class="loading">Loading cache...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      const checkpointRow = document.getElementById('checkpointRow');
+      const table = document.getElementById('cacheTable');
+      const cachedCount = document.getElementById('cachedCount');
+      const storageUsed = document.getElementById('storageUsed');
+
+      async function loadCache() {
+        try {
+          const [domainsRes, storageRes] = await Promise.all([
+            fetch('/api/cached-domains'),
+            fetch('/api/total-storage')
+          ]);
+
+          const domains = await domainsRes.json();
+          const storage = await storageRes.json();
+
+          cachedCount.textContent = domains.length;
+          storageUsed.textContent = storage.totalUsed || '-';
+
+          if (!domains.length) {
+            table.innerHTML = '<tr><td colspan="5" class="empty">No cached domains yet.</td></tr>';
+            return;
+          }
+
+          table.innerHTML = domains.map(domain => `
+            <tr>
+              <td class="domain"><a href="https://${domain.domain}" target="_blank">${domain.domain}</a></td>
+              <td class="cid">${domain.cid}</td>
+              <td>${domain.last_cached || '-'}</td>
+              <td>${domain.auto_seeding ? 'Enabled' : 'Off'}</td>
+              <td class="actions">
+                <a href="https://webui.ipfs.io/#/ipfs/${domain.cid}" target="_blank">
+                  <button class="btn btn-primary" data-tooltip="Browse IPFS">🔍</button>
+                </a>
+                <button class="btn btn-danger" data-tooltip="Remove cache" onclick="clearCache('${domain.domain}')">🗑️</button>
+                <button class="btn ${domain.auto_seeding ? 'btn-danger' : 'btn-success'}" data-tooltip="${domain.auto_seeding ? 'Disable auto-seed' : 'Enable auto-seed'}" onclick="toggleAuto('${domain.domain}', ${domain.auto_seeding})">${domain.auto_seeding ? '⏸️' : '🌱'}</button>
+              </td>
+            </tr>
+          `).join('');
+        } catch (err) {
+          table.innerHTML = `<tr><td colspan="5" class="empty">Failed to load cache.</td></tr>`;
+        }
+      }
+
+      function ensureJazzicon() {
+        if (window.jazzicon) {
+          return Promise.resolve();
+        }
+        return new Promise(resolve => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/jazzicon@2.0.0/dist/jazzicon.min.js';
+          script.onload = () => resolve();
+          script.onerror = () => resolve();
+          document.head.appendChild(script);
+        });
+      }
+
+      async function loadCheckpoints() {
+        try {
+          const response = await fetch('/api/helios/checkpoints');
+          const data = await response.json();
+          const checkpoints = data.checkpoints || [];
+
+          checkpointRow.innerHTML = '';
+          if (!checkpoints.length) {
+            checkpointRow.innerHTML = '<span style="color: var(--muted);">No checkpoints yet.</span>';
+            return;
+          }
+
+          await ensureJazzicon();
+          checkpoints.forEach(hash => {
+            if (window.jazzicon) {
+              const seed = parseInt(hash.slice(2, 10), 16);
+              const icon = window.jazzicon(32, seed);
+              icon.title = hash;
+              icon.style.borderRadius = '8px';
+              checkpointRow.appendChild(icon);
+            } else {
+              const span = document.createElement('span');
+              span.textContent = hash.slice(0, 10);
+              span.title = hash;
+              span.style.fontFamily = 'SF Mono, Monaco, monospace';
+              checkpointRow.appendChild(span);
+            }
+          });
+        } catch (err) {
+          checkpointRow.innerHTML = '<span style="color: var(--muted);">Failed to load checkpoints.</span>';
+        }
+      }
+
+      async function toggleAuto(domain, current) {
+        await fetch(`/api/toggle-auto-seed?domain=${encodeURIComponent(domain)}&enable=${!current}`, {
+          method: 'POST'
+        });
+        loadCache();
+      }
+
+      async function clearCache(domain) {
+        await fetch(`/api/clear-cache?domain=${encodeURIComponent(domain)}`, {
+          method: 'POST'
+        });
+        loadCache();
+      }
+
+      loadCache();
+      loadCheckpoints();
+    </script>
+  </body>
+</html>
