@@ -2,6 +2,11 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc,
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use eyre::{Result, WrapErr};
@@ -15,29 +20,111 @@ const IPFS_API_PORT: u16 = 5001;
 const MANAGED_GATEWAY_PORT: u16 = 58080;
 const KUBO_DIST_BASE: &str = "https://dist.ipfs.tech/kubo";
 
+pub struct KuboManager {
+    gateway_port: u16,
+    http_client: reqwest::Client,
+    ipfs_path: Option<PathBuf>,
+    repo_dir: Option<PathBuf>,
+    child: Arc<Mutex<Option<Child>>>,
+    offline: Arc<AtomicBool>,
+}
+
+impl KuboManager {
+    pub fn gateway_port(&self) -> u16 {
+        self.gateway_port
+    }
+
+    pub fn is_managed(&self) -> bool {
+        self.ipfs_path.is_some()
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    pub fn set_offline(&self, offline: bool) -> Result<bool> {
+        if !self.is_managed() || offline == self.is_offline() {
+            return Ok(false);
+        }
+
+        tracing::info!("Restarting IPFS daemon (offline={offline})");
+
+        let ipfs_path = self
+            .ipfs_path
+            .clone()
+            .ok_or_else(|| eyre::eyre!("Managed IPFS binary missing"))?;
+        let repo_dir = self
+            .repo_dir
+            .clone()
+            .ok_or_else(|| eyre::eyre!("Managed IPFS repo missing"))?;
+
+        let mut guard = self
+            .child
+            .lock()
+            .map_err(|_| eyre::eyre!("Failed to lock kubo process"))?;
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let child = start_kubo_daemon(&ipfs_path, &repo_dir, offline)?;
+        *guard = Some(child);
+        self.offline.store(offline, Ordering::SeqCst);
+        Ok(true)
+    }
+}
+
 pub async fn init_kubo(
     http_client: reqwest::Client,
     base_dir: PathBuf,
-) -> Result<(u16, Option<Child>)> {
+) -> Result<KuboManager> {
     tracing::info!("Starting IPFS (kubo)");
+    tracing::info!("Checking for existing IPFS API on port {IPFS_API_PORT}");
     if check_existing_ipfs(&http_client).await {
         let gateway_port = fetch_gateway_port(&http_client).await.unwrap_or(8080);
         tracing::info!(
             "Using existing IPFS on port {IPFS_API_PORT} (gateway {gateway_port})"
         );
-        return Ok((gateway_port, None));
+        return Ok(KuboManager {
+            gateway_port,
+            http_client,
+            ipfs_path: None,
+            repo_dir: None,
+            child: Arc::new(Mutex::new(None)),
+            offline: Arc::new(AtomicBool::new(false)),
+        });
     }
 
     let (bin_dir, repo_dir, download_dir) = kubo_paths(&base_dir);
+    tracing::info!("Downloading Kubo {KUBO_VERSION}");
     let ipfs_path = download_kubo(&http_client, &bin_dir, &download_dir).await?;
+    tracing::info!("Ensuring IPFS repo at {}", repo_dir.display());
     ensure_repo_initialized(&ipfs_path, &repo_dir)?;
+    tracing::info!("Configuring IPFS gateway on port {MANAGED_GATEWAY_PORT}");
     update_gateway_config(&repo_dir, MANAGED_GATEWAY_PORT)?;
 
-    let child = start_kubo_daemon(&ipfs_path, &repo_dir)?;
+    tracing::info!("Starting IPFS daemon (offline=false)");
+    let child = start_kubo_daemon(&ipfs_path, &repo_dir, false)?;
+    tracing::info!("Waiting for IPFS API to become ready");
     wait_for_ipfs(&http_client).await?;
     tracing::info!("Managed IPFS started (gateway {MANAGED_GATEWAY_PORT})");
 
-    Ok((MANAGED_GATEWAY_PORT, Some(child)))
+    Ok(KuboManager {
+        gateway_port: MANAGED_GATEWAY_PORT,
+        http_client,
+        ipfs_path: Some(ipfs_path),
+        repo_dir: Some(repo_dir),
+        child: Arc::new(Mutex::new(Some(child))),
+        offline: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 async fn check_existing_ipfs(http_client: &reqwest::Client) -> bool {
@@ -246,9 +333,13 @@ fn update_gateway_config(repo_dir: &Path, gateway_port: u16) -> Result<()> {
     Ok(())
 }
 
-fn start_kubo_daemon(ipfs_path: &Path, repo_dir: &Path) -> Result<Child> {
-    Command::new(ipfs_path)
-        .arg("daemon")
+fn start_kubo_daemon(ipfs_path: &Path, repo_dir: &Path, offline: bool) -> Result<Child> {
+    let mut command = Command::new(ipfs_path);
+    command.arg("daemon");
+    if offline {
+        command.arg("--offline");
+    }
+    command
         .env("IPFS_PATH", repo_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

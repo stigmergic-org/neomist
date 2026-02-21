@@ -11,11 +11,11 @@ use sha1::{Digest, Sha1};
 
 use crate::constants::{CA_CERT_DIR, CA_CERT_PREFIX};
 
-const ROOT_SUBJECT: &str = "/C=US/ST=Local/L=Local/O=Neomist/OU=Development/CN=Neomist Root CA";
+const ROOT_SUBJECT: &str = "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Root CA";
 const INTERMEDIATE_ETH_SUBJECT: &str =
-    "/C=US/ST=Local/L=Local/O=Neomist/OU=Development/CN=Neomist Intermediate CA (ETH)";
+    "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Intermediate CA (ETH)";
 const INTERMEDIATE_WEI_SUBJECT: &str =
-    "/C=US/ST=Local/L=Local/O=Neomist/OU=Development/CN=Neomist Intermediate CA (WEI)";
+    "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Intermediate CA (WEI)";
 
 #[derive(Debug)]
 pub struct CertManager {
@@ -335,7 +335,7 @@ fn create_leaf_cert(
     sans: Vec<&str>,
 ) -> Result<()> {
     let csr_path = cert_out.with_extension("csr");
-    let subject = format!("/C=US/ST=Local/L=Local/O=Neomist/OU=Development/CN={subject_cn}");
+    let subject = format!("/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN={subject_cn}");
     let csr_status = Command::new("openssl")
         .args(["req", "-new", "-key"])
         .arg(key_path)
