@@ -6,7 +6,7 @@ use eyre::{Result, WrapErr};
 use helios::ethereum::EthereumClient;
 use image::GenericImageView;
 use tokio::runtime::Handle;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
 use tracing::warn;
 
@@ -79,11 +79,22 @@ pub fn run_tray(
     let icon_active = load_tray_icon(ICON_ACTIVE)?;
     let icon_inactive = load_tray_icon(ICON_INACTIVE)?;
     let menu = Menu::new();
+    let title_item = MenuItem::new("NeoMist", false, None);
+    let separator_top = PredefinedMenuItem::separator();
+    let dashboard_item = MenuItem::new("Dashboard", true, None);
     let explore_item = MenuItem::new("Explore IPFS", true, None);
     let p2p_item = MenuItem::new(p2p_menu_label(false), false, None);
+    let separator_quit = PredefinedMenuItem::separator();
     let quit_item = MenuItem::new("Quit", true, None);
+    menu.append(&title_item).wrap_err("Failed to add tray menu")?;
+    menu.append(&separator_top)
+        .wrap_err("Failed to add tray menu")?;
+    menu.append(&dashboard_item)
+        .wrap_err("Failed to add tray menu")?;
     menu.append(&explore_item).wrap_err("Failed to add tray menu")?;
     menu.append(&p2p_item).wrap_err("Failed to add tray menu")?;
+    menu.append(&separator_quit)
+        .wrap_err("Failed to add tray menu")?;
     menu.append(&quit_item).wrap_err("Failed to add tray menu")?;
 
     let tray_icon = TrayIconBuilder::new()
@@ -116,6 +127,7 @@ pub fn run_tray(
             refresh_p2p_menu(&tray_state, &p2p_item);
 
             let networking_enabled = resolve_networking_enabled(&tray_state);
+            refresh_explore_menu(networking_enabled, &explore_item);
             if last_networking_enabled != Some(networking_enabled) {
                 let icon = if networking_enabled {
                     icon_active.clone()
@@ -131,7 +143,9 @@ pub fn run_tray(
         }
 
         if let Ok(event) = menu_events.try_recv() {
-            if event.id == explore_item.id() {
+            if event.id == dashboard_item.id() {
+                open_url("https://neomist.localhost");
+            } else if event.id == explore_item.id() {
                 open_url("https://webui.ipfs.io");
             } else if event.id == p2p_item.id() {
                 match tray_state.kubo_manager() {
@@ -227,4 +241,8 @@ fn refresh_p2p_menu(tray_state: &TrayState, p2p_item: &MenuItem) {
             p2p_item.set_enabled(false);
         }
     }
+}
+
+fn refresh_explore_menu(networking_enabled: bool, explore_item: &MenuItem) {
+    explore_item.set_enabled(networking_enabled);
 }

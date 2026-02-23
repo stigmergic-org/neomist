@@ -16,6 +16,8 @@ helios = { git = "https://github.com/a16z/helios", branch = "master" }
 hickory-proto = "0.24"
 image = "0.25"
 base64 = "0.22"
+include_dir = "0.7"
+mime_guess = "2.0"
 hyper = "1.6"
 hyper-util = "0.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }

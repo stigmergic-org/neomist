@@ -24,12 +24,12 @@ pub async fn poll_gas_price(
                         let gwei = wei as f64 / 1_000_000_000f64;
                         if gwei < 1.0 {
                             let mwei = wei as f64 / 1_000_000f64;
-                            format!("{:.0} Mw", mwei)
+                            format!("{:.0} Mwei", mwei)
                         } else {
-                            format!("{:.1} Gw", gwei)
+                            format!("{:.1} Gwei", gwei)
                         }
                     }
-                    Err(_) => format!("{} Gw", price / U256::from(1_000_000_000u64)),
+                    Err(_) => format!("{} Gwei", price / U256::from(1_000_000_000u64)),
                 };
                 let _ = tx.send(label);
             }

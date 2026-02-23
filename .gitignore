@@ -1,1 +1,7 @@
 target
+node_modules
+ui/node_modules
+ui/.vite
+ui/dist
+ui/dist
+.DS_Store

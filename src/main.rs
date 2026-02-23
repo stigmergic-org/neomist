@@ -29,7 +29,7 @@ use tracing_subscriber::{EnvFilter, Registry, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::config::{config_path, data_dir, load_or_create_config, save_config};
+use crate::config::{cache_dir, config_path, data_dir, load_or_create_config, save_config};
 use crate::certs::CertManager;
 use crate::state::AppState;
 
@@ -52,8 +52,13 @@ fn main() -> Result<()> {
     }
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let checkpoint_history = Arc::new(tokio::sync::RwLock::new(VecDeque::new()));
-    let checkpoint_layer = checkpoints::CheckpointLayer::new(checkpoint_history.clone(), 5);
+    let checkpoint_cache_dir = cache_dir()?;
+    let checkpoint_cache_path = checkpoints::checkpoint_cache_path(&checkpoint_cache_dir);
+    let checkpoint_history = Arc::new(tokio::sync::RwLock::new(
+        checkpoints::load_checkpoint_history(&checkpoint_cache_path, 5),
+    ));
+    let checkpoint_layer =
+        checkpoints::CheckpointLayer::new(checkpoint_history.clone(), 5, checkpoint_cache_path);
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
     Registry::default()
         .with(fmt_layer)

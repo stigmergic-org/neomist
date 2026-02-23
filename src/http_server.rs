@@ -3,11 +3,18 @@ use std::net::SocketAddr;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{header::HOST, Request, Response, StatusCode};
-use axum::response::{Html, IntoResponse, Json};
+use axum::http::{
+    header::{CACHE_CONTROL, CONTENT_TYPE, HOST},
+    Request,
+    Response,
+    StatusCode,
+};
+use axum::response::{IntoResponse, Json};
 use axum::routing::{any, get, post};
 use axum::Router;
 use eyre::{Result, WrapErr};
+use include_dir::{File, Dir, include_dir};
+use mime_guess::from_path;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::{ServerConfig, sign::CertifiedKey};
 use rustls::crypto::aws_lc_rs::sign::any_supported_type;
@@ -25,6 +32,7 @@ use crate::state::AppState;
 
 const PRIMARY_HTTPS_PORT: u16 = 443;
 const FALLBACK_HTTPS_PORT: u16 = 8443;
+static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
 #[derive(Debug, serde::Serialize)]
 struct SaveResponse {
@@ -33,9 +41,8 @@ struct SaveResponse {
 }
 
 pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager>) -> Result<()> {
-    info!("Starting HTTPS server for node.localhost and ethereum.localhost");
+    info!("Starting HTTPS server for node.localhost and neomist.localhost");
     let eth_router = Router::new()
-        .route("/", get(serve_ui))
         .route("/rpc", post(proxy_rpc))
         .route("/health", get(healthcheck))
         .route("/api/cached-domains", get(get_cached_domains))
@@ -44,6 +51,8 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         .route("/api/clear-cache", post(clear_cache))
         .route("/api/helios/checkpoints", get(get_checkpoints))
         .route("/api/config", get(get_config).post(save_config_handler))
+        .route("/", get(serve_ui))
+        .route("/*path", get(serve_ui))
         .with_state(state.clone());
 
     let ens_router = Router::new()
@@ -103,7 +112,7 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
                         .unwrap_or("")
                         .to_lowercase();
 
-                    if host.starts_with("ethereum.localhost") {
+                    if host.starts_with("neomist.localhost") {
                         match eth_router.oneshot(req).await {
                             Ok(resp) => Ok::<_, Infallible>(resp),
                             Err(_) => Ok(Response::builder()
@@ -169,8 +178,56 @@ async fn save_config_handler(
     }
 }
 
-async fn serve_ui() -> Html<&'static str> {
-    Html(include_str!("../ui/cache.html"))
+async fn serve_ui(req: Request<Body>) -> Response<Body> {
+    let path = req.uri().path();
+    if path.starts_with("/api/") {
+        return not_found();
+    }
+
+    let asset_path = path.trim_start_matches('/');
+    if asset_path.is_empty() {
+        return asset_response("index.html");
+    }
+
+    if let Some(file) = UI_DIST.get_file(asset_path) {
+        return file_response(asset_path, file);
+    }
+
+    if asset_path.starts_with("assets/") || asset_path.contains('.') {
+        return not_found();
+    }
+
+    asset_response("index.html")
+}
+
+fn asset_response(path: &str) -> Response<Body> {
+    match UI_DIST.get_file(path) {
+        Some(file) => file_response(path, file),
+        None => not_found(),
+    }
+}
+
+fn file_response(path: &str, file: &File) -> Response<Body> {
+    let mime = from_path(path).first_or_octet_stream();
+    let cache = if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, mime.as_ref())
+        .header(CACHE_CONTROL, cache)
+        .body(Body::from(file.contents().to_vec()))
+        .unwrap()
+}
+
+fn not_found() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Body::from("Not found"))
+        .unwrap()
 }
 
 async fn healthcheck() -> impl IntoResponse {

@@ -42,6 +42,13 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn cache_dir() -> Result<PathBuf> {
+    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
+    let dir = base.cache_dir().join(APP_DIR_NAME);
+    fs::create_dir_all(&dir).wrap_err("Failed to create cache directory")?;
+    Ok(dir)
+}
+
 pub fn load_or_create_config(path: &Path) -> Result<AppConfig> {
     if path.exists() {
         let contents = fs::read_to_string(path).wrap_err("Failed to read config file")?;
