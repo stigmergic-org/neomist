@@ -2,8 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use eyre::{Result, WrapErr};
 use hickory_proto::op::{Message, MessageType, ResponseCode};
-use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::rr::rdata::A;
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use tokio::net::UdpSocket;
 
 pub async fn run_dns_server(port: u16) -> Result<()> {

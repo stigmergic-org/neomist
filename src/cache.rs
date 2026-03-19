@@ -1,9 +1,9 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use eyre::{Result, WrapErr};
+use reqwest::multipart;
 use serde::Serialize;
 use url::form_urlencoded;
-use reqwest::multipart;
 
 use crate::constants::MFS_CACHE_DIR;
 use crate::state::AppState;
@@ -205,10 +205,7 @@ async fn list_mfs_dir(state: &AppState, path: &str) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .wrap_err("Failed to parse MFS ls")?;
+    let body: serde_json::Value = response.json().await.wrap_err("Failed to parse MFS ls")?;
     let entries = body
         .get("Entries")
         .and_then(|value| value.as_array())
@@ -239,10 +236,7 @@ async fn mfs_stat_hash(state: &AppState, path: &str) -> Result<String> {
     if !response.status().is_success() {
         return Err(eyre::eyre!("MFS stat failed"));
     }
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .wrap_err("Failed to parse MFS stat")?;
+    let body: serde_json::Value = response.json().await.wrap_err("Failed to parse MFS stat")?;
     let hash = body
         .get("Hash")
         .and_then(|value| value.as_str())

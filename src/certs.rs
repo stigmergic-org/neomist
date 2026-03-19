@@ -17,6 +17,8 @@ const INTERMEDIATE_ETH_SUBJECT: &str =
 const INTERMEDIATE_WEI_SUBJECT: &str =
     "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Intermediate CA (WEI)";
 const LOCAL_UI_HOST: &str = "neomist.localhost";
+const IPFS_UI_HOST: &str = "ipfs.localhost";
+const LOCAL_UI_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_UI_HOST];
 
 #[derive(Debug)]
 pub struct CertManager {
@@ -58,7 +60,7 @@ impl CertManager {
 
         if have_base {
             if is_ec_key(&self.server_key_path)? {
-                if leaf_cert_ok(&self.ethereum_cert_path, LOCAL_UI_HOST)? {
+                if leaf_cert_ok(&self.ethereum_cert_path, LOCAL_UI_HOSTS)? {
                     return Ok(());
                 }
             }
@@ -95,7 +97,7 @@ impl CertManager {
             &self.server_key_path,
             &self.ethereum_cert_path,
             LOCAL_UI_HOST,
-            vec![LOCAL_UI_HOST],
+            LOCAL_UI_HOSTS.to_vec(),
         )?;
 
         fs::remove_file(&root_key_path).wrap_err("Failed to delete temp root key")?;
@@ -123,7 +125,7 @@ impl CertManager {
         host: &str,
     ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         let host = host.to_lowercase();
-        if host == LOCAL_UI_HOST {
+        if LOCAL_UI_HOSTS.iter().any(|candidate| host == *candidate) {
             return load_leaf_chain(
                 &self.ethereum_cert_path,
                 &self.root_cert_path,
@@ -396,7 +398,7 @@ fn is_ec_key(path: &Path) -> Result<bool> {
     Ok(stdout.contains("EC Public-Key") || stdout.contains("ASN1 OID: prime256v1"))
 }
 
-fn leaf_cert_ok(path: &Path, expected_host: &str) -> Result<bool> {
+fn leaf_cert_ok(path: &Path, expected_hosts: &[&str]) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -410,9 +412,11 @@ fn leaf_cert_ok(path: &Path, expected_host: &str) -> Result<bool> {
         return Ok(false);
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let host_match = stdout.contains(&format!("DNS:{expected_host}"))
-        || stdout.contains(&format!("DNS: {expected_host}"));
-    Ok(host_match
+    let hosts_match = expected_hosts.iter().all(|expected_host| {
+        stdout.contains(&format!("DNS:{expected_host}"))
+            || stdout.contains(&format!("DNS: {expected_host}"))
+    });
+    Ok(hosts_match
         && !stdout.contains("Key Encipherment")
         && stdout.contains("Extended Key Usage")
         && stdout.contains("TLS Web Server Authentication"))

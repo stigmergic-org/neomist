@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -33,6 +34,7 @@ use crate::state::AppState;
 const PRIMARY_HTTPS_PORT: u16 = 443;
 const FALLBACK_HTTPS_PORT: u16 = 8443;
 static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
+static IPFS_PROXY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 #[derive(Debug, serde::Serialize)]
 struct SaveResponse {
@@ -41,7 +43,7 @@ struct SaveResponse {
 }
 
 pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager>) -> Result<()> {
-    info!("Starting HTTPS server for node.localhost and neomist.localhost");
+    info!("Starting HTTPS server for node.localhost, neomist.localhost, and ipfs.localhost");
     let eth_router = Router::new()
         .route("/rpc", post(proxy_rpc))
         .route("/health", get(healthcheck))
@@ -58,6 +60,11 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
     let ens_router = Router::new()
         .route("/", any(ens_lookup))
         .route("/*path", any(ens_lookup))
+        .with_state(state.clone());
+
+    let ipfs_router = Router::new()
+        .route("/", any(proxy_ipfs))
+        .route("/*path", any(proxy_ipfs))
         .with_state(state.clone());
 
     let primary_addr = SocketAddr::from(([0, 0, 0, 0], PRIMARY_HTTPS_PORT));
@@ -89,6 +96,7 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         let acceptor = acceptor.clone();
         let eth_router = eth_router.clone();
         let ens_router = ens_router.clone();
+        let ipfs_router = ipfs_router.clone();
 
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(stream).await {
@@ -102,6 +110,7 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
             let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                 let eth_router = eth_router.clone();
                 let ens_router = ens_router.clone();
+                let ipfs_router = ipfs_router.clone();
 
                 async move {
                     let req = req.map(Body::new);
@@ -118,6 +127,14 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
                             Err(_) => Ok(Response::builder()
                                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                                 .body(Body::from("UI routing error"))
+                                .unwrap()),
+                        }
+                    } else if host.starts_with("ipfs.localhost") {
+                        match ipfs_router.oneshot(req).await {
+                            Ok(resp) => Ok::<_, Infallible>(resp),
+                            Err(_) => Ok(Response::builder()
+                                .status(StatusCode::BAD_GATEWAY)
+                                .body(Body::from("IPFS routing error"))
                                 .unwrap()),
                         }
                     } else if host.ends_with(".eth.localhost")
@@ -337,6 +354,110 @@ async fn get_checkpoints(State(state): State<AppState>) -> Response<Body> {
 
 async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {
     ens::proxy_request(&state, request).await
+}
+
+async fn proxy_ipfs(State(state): State<AppState>, request: Request<Body>) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    if parts.uri.path() == "/webui" {
+        return Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header("location", "/webui/")
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    let mut url = format!("{}{}", state.ipfs_api_url.trim_end_matches('/'), parts.uri.path());
+    if let Some(query) = parts.uri.query() {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("Invalid request body"))
+                .unwrap();
+        }
+    };
+
+    let proxy_client = match ipfs_proxy_client() {
+        Some(client) => client,
+        None => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("IPFS proxy client unavailable"))
+                .unwrap();
+        }
+    };
+
+    let mut req_builder = proxy_client.request(parts.method.clone(), url);
+    for (name, value) in parts.headers.iter() {
+        let name_str = name.as_str();
+        if name_str.eq_ignore_ascii_case("host")
+            || name_str.eq_ignore_ascii_case("connection")
+            || name_str.eq_ignore_ascii_case("keep-alive")
+            || name_str.eq_ignore_ascii_case("proxy-authenticate")
+            || name_str.eq_ignore_ascii_case("proxy-authorization")
+            || name_str.eq_ignore_ascii_case("te")
+            || name_str.eq_ignore_ascii_case("trailers")
+            || name_str.eq_ignore_ascii_case("transfer-encoding")
+            || name_str.eq_ignore_ascii_case("upgrade")
+        {
+            continue;
+        }
+        req_builder = req_builder.header(name, value);
+    }
+
+    let upstream = match req_builder.body(body_bytes).send().await {
+        Ok(resp) => resp,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(Body::from("IPFS request failed"))
+                .unwrap();
+        }
+    };
+
+    let status = upstream.status();
+    let mut builder = Response::builder().status(status);
+    for (name, value) in upstream.headers().iter() {
+        let name_str = name.as_str();
+        if name_str.eq_ignore_ascii_case("connection")
+            || name_str.eq_ignore_ascii_case("keep-alive")
+            || name_str.eq_ignore_ascii_case("proxy-authenticate")
+            || name_str.eq_ignore_ascii_case("proxy-authorization")
+            || name_str.eq_ignore_ascii_case("te")
+            || name_str.eq_ignore_ascii_case("trailers")
+            || name_str.eq_ignore_ascii_case("transfer-encoding")
+            || name_str.eq_ignore_ascii_case("upgrade")
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+
+    match upstream.bytes().await {
+        Ok(bytes) => builder.body(Body::from(bytes)).unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(Body::from("IPFS response failed"))
+            .unwrap(),
+    }
+}
+
+fn ipfs_proxy_client() -> Option<&'static reqwest::Client> {
+    if let Some(client) = IPFS_PROXY_CLIENT.get() {
+        return Some(client);
+    }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    let _ = IPFS_PROXY_CLIENT.set(client);
+    IPFS_PROXY_CLIENT.get()
 }
 
 async fn proxy_rpc(

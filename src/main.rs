@@ -1,13 +1,13 @@
 #[cfg(target_os = "windows")]
 compile_error!("NeoMist only supports macOS and Linux.");
 
+mod cache;
+mod certs;
+mod checkpoints;
 mod config;
 mod constants;
 mod dns;
 mod dns_server;
-mod certs;
-mod cache;
-mod checkpoints;
 mod ens;
 mod gas;
 mod http_server;
@@ -15,40 +15,72 @@ mod ipfs;
 mod state;
 mod tray;
 
-use std::sync::{Arc, mpsc};
 use std::collections::VecDeque;
 use std::env;
+use std::sync::{Arc, mpsc};
 
 use alloy::providers::{Provider, ProviderBuilder};
 use eyre::{Result, WrapErr};
-use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
+use helios::ethereum::{EthereumClient, EthereumClientBuilder, config::networks::Network};
 use reqwest::Url;
 use tokio::signal;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, Registry, Layer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, Registry};
 
-use crate::config::{cache_dir, config_path, data_dir, load_or_create_config, save_config};
 use crate::certs::CertManager;
+use crate::config::{cache_dir, config_path, data_dir, load_or_create_config, save_config};
 use crate::state::AppState;
 
 const HELIOS_RPC_ADDR: &str = "127.0.0.1:8545";
 
+const HELP_TEXT: &str = "NeoMist
+
+Usage:
+  neomist
+  neomist uninstall --yes
+  neomist --help
+
+Commands:
+  uninstall   Remove NeoMist DNS resolvers and certificates
+
+Options:
+  -h, --help  Print help
+";
+
+const UNINSTALL_HELP_TEXT: &str = "Uninstall NeoMist
+
+Usage:
+  neomist uninstall --yes
+
+Options:
+  --yes       Confirm uninstall
+  -h, --help  Print help
+";
+
+enum CliCommand {
+    Run,
+    ShowHelp(&'static str),
+    Uninstall,
+}
+
 fn main() -> Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match parse_cli_args(&args)? {
+        CliCommand::Run => {}
+        CliCommand::ShowHelp(help_text) => {
+            println!("{help_text}");
+            return Ok(());
+        }
+        CliCommand::Uninstall => return uninstall(),
+    }
+
     if rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .is_err()
     {
         return Err(eyre::eyre!("Failed to install rustls crypto provider"));
-    }
-
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 && args[1] == "uninstall" {
-        if !args.iter().any(|arg| arg == "--yes") {
-            return Err(eyre::eyre!("Uninstall requires --yes"));
-        }
-        return uninstall();
     }
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -82,6 +114,54 @@ fn main() -> Result<()> {
     tray::run_tray(gas_rx, tray_state)
 }
 
+fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
+    if args.is_empty() {
+        return Ok(CliCommand::Run);
+    }
+
+    match args[0].as_str() {
+        "-h" | "--help" | "help" => {
+            if args.len() == 1 {
+                Ok(CliCommand::ShowHelp(HELP_TEXT))
+            } else {
+                Err(eyre::eyre!(
+                    "Unexpected argument after help flag: `{}`\nRun `neomist --help` for usage.",
+                    args[1]
+                ))
+            }
+        }
+        "uninstall" => parse_uninstall_args(&args[1..]),
+        unknown => Err(eyre::eyre!(
+            "Unknown command or option: `{unknown}`\nRun `neomist --help` for usage."
+        )),
+    }
+}
+
+fn parse_uninstall_args(args: &[String]) -> Result<CliCommand> {
+    if args.is_empty() {
+        return Err(eyre::eyre!("Uninstall requires --yes"));
+    }
+
+    let mut confirmed = false;
+    for arg in args {
+        match arg.as_str() {
+            "--yes" => confirmed = true,
+            "-h" | "--help" | "help" => return Ok(CliCommand::ShowHelp(UNINSTALL_HELP_TEXT)),
+            _ => {
+                return Err(eyre::eyre!(
+                    "Unknown option for uninstall: `{arg}`\nRun `neomist uninstall --help` for usage."
+                ));
+            }
+        }
+    }
+
+    if !confirmed {
+        return Err(eyre::eyre!("Uninstall requires --yes"));
+    }
+
+    Ok(CliCommand::Uninstall)
+}
+
 fn init_services(
     tray_state: Arc<tray::TrayState>,
     gas_tx: mpsc::Sender<String>,
@@ -103,7 +183,9 @@ fn init_services(
 
     info!("Init: ensuring certificates");
     let cert_manager = CertManager::new(&data_dir);
-    cert_manager.ensure_certs().wrap_err("Failed to create certificates")?;
+    cert_manager
+        .ensure_certs()
+        .wrap_err("Failed to create certificates")?;
     if !cert_manager
         .is_root_installed()
         .wrap_err("Failed to verify root certificate")?
@@ -244,7 +326,10 @@ fn uninstall() -> Result<()> {
     Ok(())
 }
 
-fn maybe_install_dns(mut config: config::AppConfig, config_path: &std::path::Path) -> Result<config::AppConfig> {
+fn maybe_install_dns(
+    mut config: config::AppConfig,
+    config_path: &std::path::Path,
+) -> Result<config::AppConfig> {
     if dns::dns_ready() {
         if !config.dns_setup_installed {
             config.dns_setup_installed = true;

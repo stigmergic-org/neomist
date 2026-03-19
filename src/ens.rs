@@ -1,12 +1,12 @@
-use alloy::ens::{namehash, ENS_ADDRESS};
-use alloy::primitives::{address, keccak256, Address, Bytes as AlloyBytes, B256};
+use alloy::ens::{ENS_ADDRESS, namehash};
+use alloy::primitives::{Address, B256, Bytes as AlloyBytes, address, keccak256};
 use alloy::providers::DynProvider;
 use alloy::sol;
 use axum::body::Body;
-use axum::http::{header::HOST, Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode, header::HOST};
 use eyre::{Result, WrapErr};
-use tracing::warn;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 use url::form_urlencoded;
 
 use crate::constants::MFS_CACHE_DIR;
@@ -29,9 +29,8 @@ sol! {
     }
 }
 
-const WEI_NODE: B256 = alloy::primitives::b256!(
-    "0xa82820059d5df798546bcc2985157a77c3eef25eba9ba01899927333efacbd6f"
-);
+const WEI_NODE: B256 =
+    alloy::primitives::b256!("0xa82820059d5df798546bcc2985157a77c3eef25eba9ba01899927333efacbd6f");
 const WEI_REGISTRY: Address = address!("0x0000000000696760E15f265e828DB644A0c242EB");
 
 pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response<Body> {
@@ -73,9 +72,7 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 
     let mut url = format!(
         "http://{}.ipfs.localhost:{}{}",
-        cid,
-        state.ipfs_gateway_port,
-        path
+        cid, state.ipfs_gateway_port, path
     );
     if let Some(query) = query {
         url.push('?');
@@ -92,9 +89,7 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
         }
     };
 
-    let mut req_builder = state
-        .http_client
-        .request(parts.method.clone(), url);
+    let mut req_builder = state.http_client.request(parts.method.clone(), url);
 
     for (name, value) in parts.headers.iter() {
         let name_str = name.as_str();
@@ -187,7 +182,10 @@ async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result<()>
         .await
         .wrap_err("Failed to copy CID into MFS")?;
     if !response.status().is_success() {
-        return Err(eyre::eyre!("MFS copy failed with status {}", response.status()));
+        return Err(eyre::eyre!(
+            "MFS copy failed with status {}",
+            response.status()
+        ));
     }
 
     Ok(())
@@ -259,7 +257,10 @@ async fn mfs_stat_hash(state: &AppState, path: &str) -> Result<String> {
         .await
         .wrap_err("Failed to stat MFS path")?;
     if !response.status().is_success() {
-        return Err(eyre::eyre!("MFS stat failed with status {}", response.status()));
+        return Err(eyre::eyre!(
+            "MFS stat failed with status {}",
+            response.status()
+        ));
     }
     let body: serde_json::Value = response
         .json()
@@ -279,7 +280,9 @@ async fn mfs_path_exists(state: &AppState, path: &str) -> Result<bool> {
         encode_arg(path)
     );
     let response = state.http_client.post(url).send().await;
-    Ok(response.map(|resp| resp.status().is_success()).unwrap_or(false))
+    Ok(response
+        .map(|resp| resp.status().is_success())
+        .unwrap_or(false))
 }
 
 fn encode_arg(value: &str) -> String {

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use eyre::{Result, WrapErr};
 use tokio::sync::RwLock;
-use tracing::{Event, warn};
 use tracing::field::{Field, Visit};
+use tracing::{Event, warn};
 use tracing_subscriber::Layer;
 
 const CHECKPOINT_PREFIX: &str = "saved checkpoint to DB:";

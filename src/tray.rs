@@ -146,7 +146,7 @@ pub fn run_tray(
             if event.id == dashboard_item.id() {
                 open_url("https://neomist.localhost");
             } else if event.id == explore_item.id() {
-                open_url("https://webui.ipfs.io");
+                open_url("https://ipfs.localhost/webui");
             } else if event.id == p2p_item.id() {
                 match tray_state.kubo_manager() {
                     Some(kubo_manager) => {

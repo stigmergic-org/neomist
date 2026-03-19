@@ -22,7 +22,6 @@ const KUBO_DIST_BASE: &str = "https://dist.ipfs.tech/kubo";
 
 pub struct KuboManager {
     gateway_port: u16,
-    http_client: reqwest::Client,
     ipfs_path: Option<PathBuf>,
     repo_dir: Option<PathBuf>,
     child: Arc<Mutex<Option<Child>>>,
@@ -95,7 +94,6 @@ pub async fn init_kubo(
         );
         return Ok(KuboManager {
             gateway_port,
-            http_client,
             ipfs_path: None,
             repo_dir: None,
             child: Arc::new(Mutex::new(None)),
@@ -119,7 +117,6 @@ pub async fn init_kubo(
 
     Ok(KuboManager {
         gateway_port: MANAGED_GATEWAY_PORT,
-        http_client,
         ipfs_path: Some(ipfs_path),
         repo_dir: Some(repo_dir),
         child: Arc::new(Mutex::new(Some(child))),
@@ -322,7 +319,11 @@ fn update_gateway_config(repo_dir: &Path, gateway_port: u16) -> Result<()> {
     );
 
     config["API"]["HTTPHeaders"] = serde_json::json!({
-        "Access-Control-Allow-Origin": ["https://webui.ipfs.io"],
+        "Access-Control-Allow-Origin": [
+            "https://webui.ipfs.io",
+            "https://ipfs.localhost",
+            "http://127.0.0.1:5001"
+        ],
         "Access-Control-Allow-Methods": ["GET", "POST", "PUT"],
         "Access-Control-Allow-Headers": ["X-Requested-With", "Content-Type"]
     });
