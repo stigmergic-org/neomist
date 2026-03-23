@@ -3,6 +3,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use eyre::{Result, WrapErr};
 use reqwest::multipart;
 use serde::Serialize;
+use tracing::warn;
 use url::form_urlencoded;
 
 use crate::constants::MFS_CACHE_DIR;
@@ -11,9 +12,29 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 pub struct CachedDomain {
     pub domain: String,
-    pub cid: String,
-    pub last_cached: String,
+    pub cached_at: String,
+    pub local_size: u64,
+    pub full_size: u64,
     pub auto_seeding: bool,
+    pub visit_url: String,
+    pub versions: Vec<CachedVersion>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CachedVersion {
+    pub timestamp: u64,
+    pub cid: String,
+    pub cached_at: String,
+    pub local_size: u64,
+    pub full_size: u64,
+    pub visit_url: String,
+}
+
+#[derive(Debug)]
+struct MfsStat {
+    hash: String,
+    local_size: u64,
+    full_size: u64,
 }
 
 pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> {
@@ -25,16 +46,42 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
             continue;
         }
 
-        if let Some((timestamp, cid)) = latest_site_entry(state, &site).await? {
-            let auto_seeding = read_autoseed_flag(state, &site).await.unwrap_or(false);
-            let last_cached = timestamp_to_iso(timestamp).unwrap_or_else(|| "".to_string());
-            results.push(CachedDomain {
-                domain: site,
-                cid,
-                last_cached,
-                auto_seeding,
-            });
+        let versions = list_site_versions(state, &site).await?;
+        if versions.is_empty() {
+            continue;
         }
+
+        let auto_seeding = read_autoseed_flag(state, &site).await.unwrap_or(false);
+        let site_path = format!("{MFS_CACHE_DIR}/{site}");
+        let (local_size, full_size) = match mfs_stat_with_local(state, &site_path).await {
+            Ok(stat) => (stat.local_size, stat.full_size),
+            Err(err) => {
+                warn!("Failed to stat cache domain {site}: {err}");
+                (
+                    versions.iter().map(|version| version.local_size).sum(),
+                    versions.iter().map(|version| version.full_size).sum(),
+                )
+            }
+        };
+
+        let cached_at = versions
+            .first()
+            .map(|version| version.cached_at.clone())
+            .unwrap_or_default();
+        let visit_url = versions
+            .first()
+            .map(|version| version.visit_url.clone())
+            .unwrap_or_default();
+
+        results.push(CachedDomain {
+            domain: site,
+            cached_at,
+            local_size,
+            full_size,
+            auto_seeding,
+            visit_url,
+            versions,
+        });
     }
 
     results.sort_by(|a, b| a.domain.cmp(&b.domain));
@@ -121,11 +168,19 @@ pub async fn toggle_autoseed(state: &AppState, domain: &str, enable: bool) -> Re
     Ok(())
 }
 
-pub async fn clear_cache(state: &AppState, domain: &str) -> Result<()> {
+pub async fn clear_cache(state: &AppState, domain: &str, version: Option<&str>) -> Result<()> {
     let safe_domain = domain.replace('/', "_");
-    let path = format!("{MFS_CACHE_DIR}/{safe_domain}");
+    let path = if let Some(version) = version {
+        if version.is_empty() || !version.bytes().all(|ch| ch.is_ascii_digit()) {
+            return Err(eyre::eyre!("Invalid cache version"));
+        }
+        format!("{MFS_CACHE_DIR}/{safe_domain}/{version}")
+    } else {
+        format!("{MFS_CACHE_DIR}/{safe_domain}")
+    };
+
     let url = format!(
-        "{}/api/v0/files/rm?arg={}&recursive=true",
+        "{}/api/v0/files/rm?arg={}&recursive=true&force=true",
         state.ipfs_api_url,
         encode_arg(&path)
     );
@@ -141,30 +196,43 @@ pub async fn clear_cache(state: &AppState, domain: &str) -> Result<()> {
     Ok(())
 }
 
-async fn latest_site_entry(state: &AppState, site: &str) -> Result<Option<(u64, String)>> {
+async fn list_site_versions(state: &AppState, site: &str) -> Result<Vec<CachedVersion>> {
     let site_path = format!("{MFS_CACHE_DIR}/{site}");
     let entries = list_mfs_dir(state, &site_path).await?;
-    let mut latest_ts: u64 = 0;
-    let mut latest_cid: Option<String> = None;
+    let mut versions = Vec::new();
 
     for entry in entries {
         if entry == "autoseed" {
             continue;
         }
+
         let ts = match entry.parse::<u64>() {
             Ok(ts) => ts,
             Err(_) => continue,
         };
-        if ts >= latest_ts {
-            let stat_path = format!("{site_path}/{entry}");
-            if let Ok(cid) = mfs_stat_hash(state, &stat_path).await {
-                latest_ts = ts;
-                latest_cid = Some(cid);
+
+        let stat_path = format!("{site_path}/{entry}");
+        let stat = match mfs_stat_with_local(state, &stat_path).await {
+            Ok(stat) => stat,
+            Err(err) => {
+                warn!("Failed to stat cache entry {site}/{entry}: {err}");
+                continue;
             }
-        }
+        };
+        let visit_url = cached_gateway_url(&stat.hash);
+
+        versions.push(CachedVersion {
+            timestamp: ts,
+            cid: stat.hash,
+            cached_at: timestamp_to_iso(ts).unwrap_or_default(),
+            local_size: stat.local_size,
+            full_size: stat.full_size,
+            visit_url,
+        });
     }
 
-    Ok(latest_cid.map(|cid| (latest_ts, cid)))
+    versions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(versions)
 }
 
 async fn read_autoseed_flag(state: &AppState, site: &str) -> Result<bool> {
@@ -221,9 +289,9 @@ async fn list_mfs_dir(state: &AppState, path: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-async fn mfs_stat_hash(state: &AppState, path: &str) -> Result<String> {
+async fn mfs_stat_with_local(state: &AppState, path: &str) -> Result<MfsStat> {
     let url = format!(
-        "{}/api/v0/files/stat?arg={}",
+        "{}/api/v0/files/stat?arg={}&with-local=true",
         state.ipfs_api_url,
         encode_arg(path)
     );
@@ -241,7 +309,27 @@ async fn mfs_stat_hash(state: &AppState, path: &str) -> Result<String> {
         .get("Hash")
         .and_then(|value| value.as_str())
         .ok_or_else(|| eyre::eyre!("MFS stat missing Hash"))?;
-    Ok(hash.to_string())
+
+    let local_size = body
+        .get("SizeLocal")
+        .and_then(|value| value.as_u64())
+        .or_else(|| body.get("Local").and_then(|value| value.as_u64()))
+        .or_else(|| body.get("CumulativeSize").and_then(|value| value.as_u64()))
+        .or_else(|| body.get("Size").and_then(|value| value.as_u64()))
+        .unwrap_or(0);
+
+    let full_size = body
+        .get("CumulativeSize")
+        .and_then(|value| value.as_u64())
+        .or_else(|| body.get("Size").and_then(|value| value.as_u64()))
+        .or_else(|| body.get("SizeLocal").and_then(|value| value.as_u64()))
+        .unwrap_or(local_size);
+
+    Ok(MfsStat {
+        hash: hash.to_string(),
+        local_size,
+        full_size,
+    })
 }
 
 fn encode_arg(value: &str) -> String {
@@ -253,4 +341,8 @@ fn timestamp_to_iso(ts: u64) -> Option<String> {
     let time = UNIX_EPOCH.checked_add(duration)?;
     let datetime: chrono::DateTime<chrono::Utc> = time.into();
     Some(datetime.to_rfc3339())
+}
+
+fn cached_gateway_url(cid: &str) -> String {
+    format!("https://{cid}.ipfs.localhost/")
 }

@@ -1,19 +1,25 @@
 use std::process::Command;
-use std::sync::{mpsc::Receiver, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc::Receiver};
 use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr};
 use helios::ethereum::EthereumClient;
 use image::GenericImageView;
 use tokio::runtime::Handle;
+use tracing::warn;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder};
-use tracing::warn;
 
 use crate::ipfs::KuboManager;
 
-const ICON_ACTIVE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo-active.png"));
-const ICON_INACTIVE: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo-inactive.png"));
+const ICON_ACTIVE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/logo-active.png"
+));
+const ICON_INACTIVE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/logo-inactive.png"
+));
 
 pub struct TrayState {
     helios_client: Mutex<Option<Arc<EthereumClient>>>,
@@ -70,10 +76,7 @@ impl TrayState {
     }
 }
 
-pub fn run_tray(
-    gas_rx: Receiver<String>,
-    tray_state: Arc<TrayState>,
-) -> Result<()> {
+pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<()> {
     let event_loop = tao::event_loop::EventLoop::new();
 
     let icon_active = load_tray_icon(ICON_ACTIVE)?;
@@ -86,16 +89,19 @@ pub fn run_tray(
     let p2p_item = MenuItem::new(p2p_menu_label(false), false, None);
     let separator_quit = PredefinedMenuItem::separator();
     let quit_item = MenuItem::new("Quit", true, None);
-    menu.append(&title_item).wrap_err("Failed to add tray menu")?;
+    menu.append(&title_item)
+        .wrap_err("Failed to add tray menu")?;
     menu.append(&separator_top)
         .wrap_err("Failed to add tray menu")?;
     menu.append(&dashboard_item)
         .wrap_err("Failed to add tray menu")?;
-    menu.append(&explore_item).wrap_err("Failed to add tray menu")?;
+    menu.append(&explore_item)
+        .wrap_err("Failed to add tray menu")?;
     menu.append(&p2p_item).wrap_err("Failed to add tray menu")?;
     menu.append(&separator_quit)
         .wrap_err("Failed to add tray menu")?;
-    menu.append(&quit_item).wrap_err("Failed to add tray menu")?;
+    menu.append(&quit_item)
+        .wrap_err("Failed to add tray menu")?;
 
     let tray_icon = TrayIconBuilder::new()
         .with_icon(icon_inactive.clone())
@@ -185,7 +191,6 @@ pub fn run_tray(
                 return;
             }
         }
-
     });
 }
 

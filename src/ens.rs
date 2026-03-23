@@ -4,7 +4,7 @@ use alloy::providers::DynProvider;
 use alloy::sol;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header::HOST};
-use eyre::{Result, WrapErr};
+use eyre::{Report, Result, WrapErr};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use url::form_urlencoded;
@@ -32,6 +32,23 @@ sol! {
 const WEI_NODE: B256 =
     alloy::primitives::b256!("0xa82820059d5df798546bcc2985157a77c3eef25eba9ba01899927333efacbd6f");
 const WEI_REGISTRY: Address = address!("0x0000000000696760E15f265e828DB644A0c242EB");
+const OFFLINE_LOOKUP_PATTERNS: &[&str] = &[
+    "dns error",
+    "error sending request",
+    "failed to lookup address information",
+    "out of sync",
+    "seconds behind",
+    "network is unreachable",
+    "no route to host",
+    "temporarily unavailable",
+    "connection refused",
+    "connection reset",
+    "host is down",
+    "host unreachable",
+    "network unreachable",
+    "timed out",
+    "timeout",
+];
 
 pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
@@ -47,8 +64,8 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
     let path = parts.uri.path();
     let query = parts.uri.query();
 
-    let cid = match resolve_contenthash(&state.ens_provider, ens_name).await {
-        Ok(Some(cid)) => cid,
+    let (cid, refresh_cache) = match resolve_contenthash(&state.ens_provider, ens_name).await {
+        Ok(Some(cid)) => (cid, true),
         Ok(None) => {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
@@ -57,16 +74,35 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
                 .unwrap();
         }
         Err(err) => {
-            warn!("ENS lookup failed for {ens_name}: {err:?}");
-            return Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .header("content-type", "text/plain; charset=utf-8")
-                .body(Body::from("ENS lookup failed"))
-                .unwrap();
+            if is_offline_lookup_error(&err) {
+                match latest_cached_cid(state, ens_name).await {
+                    Ok(Some(cid)) => {
+                        warn!(
+                            "ENS lookup failed for {ens_name} while offline, using cached CID {cid}: {err:?}"
+                        );
+                        (cid, false)
+                    }
+                    Ok(None) => {
+                        warn!(
+                            "ENS lookup failed for {ens_name} while offline and no cached record is available: {err:?}"
+                        );
+                        return ens_lookup_failed_response();
+                    }
+                    Err(cache_err) => {
+                        warn!(
+                            "ENS lookup failed for {ens_name} and cached fallback lookup failed: {err:?}; cache error: {cache_err:?}"
+                        );
+                        return ens_lookup_failed_response();
+                    }
+                }
+            } else {
+                warn!("ENS lookup failed for {ens_name}: {err:?}");
+                return ens_lookup_failed_response();
+            }
         }
     };
 
-    if let Err(err) = update_mfs_cache(state, ens_name, &cid).await {
+    if refresh_cache && let Err(err) = update_mfs_cache(state, ens_name, &cid).await {
         warn!("MFS cache update failed for {ens_name}: {err}");
     }
 
@@ -146,8 +182,7 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 }
 
 async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result<()> {
-    let safe_site = site.replace('/', "_");
-    let base_path = format!("{MFS_CACHE_DIR}/{safe_site}");
+    let base_path = cache_base_path(site);
 
     let latest = latest_mfs_entry(state, &base_path).await?;
     if let Some((_timestamp, existing_cid)) = &latest {
@@ -244,6 +279,12 @@ async fn latest_mfs_entry(state: &AppState, base_path: &str) -> Result<Option<(S
     Ok(latest)
 }
 
+async fn latest_cached_cid(state: &AppState, site: &str) -> Result<Option<String>> {
+    Ok(latest_mfs_entry(state, &cache_base_path(site))
+        .await?
+        .map(|(_, cid)| cid))
+}
+
 async fn mfs_stat_hash(state: &AppState, path: &str) -> Result<String> {
     let url = format!(
         "{}/api/v0/files/stat?arg={}",
@@ -287,6 +328,31 @@ async fn mfs_path_exists(state: &AppState, path: &str) -> Result<bool> {
 
 fn encode_arg(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn cache_base_path(site: &str) -> String {
+    let safe_site = site.replace('/', "_");
+    format!("{MFS_CACHE_DIR}/{safe_site}")
+}
+
+fn ens_lookup_failed_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(Body::from("ENS lookup failed"))
+        .unwrap()
+}
+
+fn is_offline_lookup_error(err: &Report) -> bool {
+    err.chain()
+        .any(|cause| looks_like_offline_lookup_message(&cause.to_string()))
+}
+
+fn looks_like_offline_lookup_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    OFFLINE_LOOKUP_PATTERNS
+        .iter()
+        .any(|pattern| message.contains(pattern))
 }
 
 fn decode_ipfs_contenthash(bytes: &AlloyBytes) -> Option<String> {
@@ -399,4 +465,29 @@ fn wei_namehash(name: &str) -> B256 {
     }
 
     node
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_offline_lookup_message;
+
+    #[test]
+    fn detects_network_unreachable_lookup_failures() {
+        assert!(looks_like_offline_lookup_message(
+            "error sending request for url (https://rpc.example): Network is unreachable (os error 51)"
+        ));
+        assert!(looks_like_offline_lookup_message(
+            "failed to lookup address information: nodename nor servname provided, or not known"
+        ));
+        assert!(looks_like_offline_lookup_message(
+            "server returned an error response: error code 1: out of sync: 1774266794 seconds behind"
+        ));
+    }
+
+    #[test]
+    fn ignores_non_network_lookup_failures() {
+        assert!(!looks_like_offline_lookup_message(
+            "failed to resolve ENS contenthash: execution reverted"
+        ));
+    }
 }

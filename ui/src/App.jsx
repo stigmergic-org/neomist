@@ -1,5 +1,5 @@
 import { generateFoamSvg } from '@simplepg/foam-identicon';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 
 const exploreLinks = [
   'dex.wei',
@@ -41,6 +41,44 @@ const formatCheckpoint = (hash) => {
   }
   return hash;
 };
+
+const formatBytes = (value) => {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    return '-';
+  }
+  if (value === 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  if (unitIndex === 0) {
+    return `${Math.round(size)} ${units[unitIndex]}`;
+  }
+  return `${size.toFixed(2)} ${units[unitIndex]}`;
+};
+
+const sizeTooltip =
+  "Doesn't deduplicate blocks, so repeated content across cached versions can be counted more than once.";
+
+function SizeHeader({ label }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span>{label}</span>
+      <div className="tooltip tooltip-bottom" data-tip={sizeTooltip}>
+        <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-base-content/30 text-[10px] leading-none opacity-70">
+          i
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState('explore');
@@ -242,7 +280,8 @@ function CacheTab() {
   const [storageUsed, setStorageUsed] = useState('-');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [actionDomain, setActionDomain] = useState('');
+  const [actionKey, setActionKey] = useState('');
+  const [expandedDomain, setExpandedDomain] = useState('');
 
   const loadCache = async () => {
     setLoading(true);
@@ -259,8 +298,12 @@ function CacheTab() {
 
       const domainsData = await domainsRes.json();
       const storageData = await storageRes.json();
-      setDomains(domainsData);
+      const domainList = Array.isArray(domainsData) ? domainsData : [];
+      setDomains(domainList);
       setStorageUsed(storageData.totalUsed || '-');
+      setExpandedDomain((current) =>
+        domainList.some((domain) => domain.domain === current) ? current : ''
+      );
     } catch (err) {
       setError('Failed to load cache.');
     } finally {
@@ -272,30 +315,69 @@ function CacheTab() {
     loadCache();
   }, []);
 
+  const toggleVersions = (domain) => {
+    setExpandedDomain((current) => (current === domain ? '' : domain));
+  };
+
   const toggleAuto = async (domain, current) => {
-    setActionDomain(domain);
+    setActionKey(`auto:${domain}`);
+    setError('');
     try {
-      await fetch(
+      const response = await fetch(
         `/api/toggle-auto-seed?domain=${encodeURIComponent(domain)}&enable=${!current}`,
         {
           method: 'POST',
         }
       );
+      if (!response.ok) {
+        throw new Error('Failed to update auto-seed state');
+      }
       await loadCache();
+    } catch (err) {
+      setError('Failed to update auto-seed state.');
     } finally {
-      setActionDomain('');
+      setActionKey('');
     }
   };
 
-  const clearCache = async (domain) => {
-    setActionDomain(domain);
+  const clearDomainCache = async (domain) => {
+    setActionKey(`clear-domain:${domain}`);
+    setError('');
     try {
-      await fetch(`/api/clear-cache?domain=${encodeURIComponent(domain)}`, {
+      const response = await fetch(`/api/clear-cache?domain=${encodeURIComponent(domain)}`, {
         method: 'POST',
       });
+      if (!response.ok) {
+        throw new Error('Failed to clear domain cache');
+      }
       await loadCache();
+    } catch (err) {
+      setError('Failed to remove cached domain.');
     } finally {
-      setActionDomain('');
+      setActionKey('');
+    }
+  };
+
+  const clearVersionCache = async (domain, timestamp) => {
+    setActionKey(`clear-version:${domain}:${timestamp}`);
+    setError('');
+    try {
+      const response = await fetch(
+        `/api/clear-cache?domain=${encodeURIComponent(domain)}&version=${encodeURIComponent(
+          String(timestamp)
+        )}`,
+        {
+          method: 'POST',
+        }
+      );
+      if (!response.ok) {
+        throw new Error('Failed to clear cached version');
+      }
+      await loadCache();
+    } catch (err) {
+      setError('Failed to remove cached version.');
+    } finally {
+      setActionKey('');
     }
   };
 
@@ -340,8 +422,13 @@ function CacheTab() {
             <thead>
               <tr>
                 <th>Domain</th>
-                <th>Latest CID</th>
-                <th>Cached</th>
+                <th>Cached at</th>
+                <th>
+                  <SizeHeader label="Local size" />
+                </th>
+                <th>
+                  <SizeHeader label="Full size" />
+                </th>
                 <th>Auto-seed</th>
                 <th>Actions</th>
               </tr>
@@ -349,7 +436,7 @@ function CacheTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="5">
+                  <td colSpan="6">
                     <div className="flex items-center gap-2 text-sm opacity-70">
                       <span className="loading loading-spinner loading-sm" />
                       Loading cache...
@@ -358,71 +445,153 @@ function CacheTab() {
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan="5" className="text-sm text-error">
+                  <td colSpan="6" className="text-sm text-error">
                     {error}
                   </td>
                 </tr>
               ) : domains.length === 0 ? (
                 <tr>
-                  <td colSpan="5" className="text-sm opacity-70">
+                  <td colSpan="6" className="text-sm opacity-70">
                     No cached domains yet.
                   </td>
                 </tr>
               ) : (
                 domains.map((domain) => (
-                  <tr key={domain.domain}>
-                    <td>
-                      <a
-                        className="link link-hover"
-                        href={`https://${domain.domain}`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {domain.domain}
-                      </a>
-                    </td>
-                    <td className="font-mono text-xs opacity-70">
-                      {domain.cid}
-                    </td>
-                    <td>{domain.last_cached || '-'}</td>
-                    <td>
-                      <span
-                        className={`badge ${
-                          domain.auto_seeding ? 'badge-success' : 'badge-ghost'
-                        }`}
-                      >
-                        {domain.auto_seeding ? 'Enabled' : 'Off'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="flex flex-wrap gap-2">
-                        <a
-                          className="btn btn-xs btn-outline btn-primary"
-                          href={`https://webui.ipfs.io/#/ipfs/${domain.cid}`}
-                          target="_blank"
-                          rel="noreferrer"
+                  <Fragment key={domain.domain}>
+                    <tr
+                      className="cursor-pointer transition-colors hover:bg-base-200/40"
+                      onClick={() => toggleVersions(domain.domain)}
+                    >
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <span className="inline-flex w-4 justify-center text-xs opacity-60">
+                            {expandedDomain === domain.domain ? 'v' : '>'}
+                          </span>
+                          <span>{domain.domain}</span>
+                        </div>
+                      </td>
+                      <td>{domain.cached_at || '-'}</td>
+                      <td>{formatBytes(domain.local_size)}</td>
+                      <td>{formatBytes(domain.full_size)}</td>
+                      <td>
+                        <span
+                          className={`badge ${
+                            domain.auto_seeding ? 'badge-success' : 'badge-ghost'
+                          }`}
                         >
-                          View
-                        </a>
-                        <button
-                          className="btn btn-xs btn-outline btn-error"
-                          type="button"
-                          onClick={() => clearCache(domain.domain)}
-                          disabled={actionDomain === domain.domain}
+                          {domain.auto_seeding ? 'Enabled' : 'Off'}
+                        </span>
+                      </td>
+                      <td>
+                        <div
+                          className="flex flex-wrap gap-2"
+                          onClick={(event) => event.stopPropagation()}
                         >
-                          Clear
-                        </button>
-                        <button
-                          className="btn btn-xs btn-outline"
-                          type="button"
-                          onClick={() => toggleAuto(domain.domain, domain.auto_seeding)}
-                          disabled={actionDomain === domain.domain}
-                        >
-                          {domain.auto_seeding ? 'Disable seed' : 'Enable seed'}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                          <a
+                            className="btn btn-xs btn-outline btn-primary"
+                            href={`https://${domain.domain}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Visit
+                          </a>
+                          <button
+                            className="btn btn-xs btn-outline btn-error"
+                            type="button"
+                            onClick={() => clearDomainCache(domain.domain)}
+                            disabled={actionKey === `clear-domain:${domain.domain}`}
+                          >
+                            Remove All
+                          </button>
+                          <button
+                            className={`btn btn-xs ${
+                              domain.auto_seeding ? 'btn-success' : 'btn-outline'
+                            }`}
+                            type="button"
+                            onClick={() => toggleAuto(domain.domain, domain.auto_seeding)}
+                            disabled={actionKey === `auto:${domain.domain}`}
+                          >
+                            Auto Seed
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+
+                    {expandedDomain === domain.domain ? (
+                      <tr>
+                        <td colSpan="6" className="bg-base-200/40 p-0">
+                          <div className="px-4 py-3">
+                            <table className="table table-sm">
+                              <thead>
+                                <tr>
+                                  <th>CID</th>
+                                  <th>Cached at</th>
+                                  <th>
+                                    <SizeHeader label="Local size" />
+                                  </th>
+                                  <th>
+                                    <SizeHeader label="Full size" />
+                                  </th>
+                                  <th>Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {Array.isArray(domain.versions) && domain.versions.length > 0 ? (
+                                  domain.versions.map((version) => (
+                                    <tr key={`${domain.domain}:${version.timestamp}:${version.cid}`}>
+                                      <td className="font-mono text-xs break-all">{version.cid}</td>
+                                      <td>{version.cached_at || '-'}</td>
+                                      <td>{formatBytes(version.local_size)}</td>
+                                      <td>{formatBytes(version.full_size)}</td>
+                                      <td>
+                                        <div className="flex flex-wrap gap-2">
+                                          <a
+                                            className="btn btn-xs btn-outline btn-primary"
+                                            href={version.visit_url || '#'}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                          >
+                                            Visit
+                                          </a>
+                                          <button
+                                            className="btn btn-xs btn-outline btn-error"
+                                            type="button"
+                                            onClick={() =>
+                                              clearVersionCache(domain.domain, version.timestamp)
+                                            }
+                                            disabled={
+                                              actionKey ===
+                                              `clear-version:${domain.domain}:${version.timestamp}`
+                                            }
+                                          >
+                                            Remove
+                                          </button>
+                                          <a
+                                            className="btn btn-xs btn-outline btn-primary"
+                                            href={`https://ipfs.localhost/webui/#/ipfs/${version.cid}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                          >
+                                            Inspect Content
+                                          </a>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ))
+                                ) : (
+                                  <tr>
+                                    <td colSpan="5" className="text-sm opacity-70">
+                                      No cached versions.
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 ))
               )}
             </tbody>

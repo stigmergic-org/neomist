@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use eyre::{Result, WrapErr};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, pkcs8_private_keys};
@@ -17,8 +17,10 @@ const INTERMEDIATE_ETH_SUBJECT: &str =
 const INTERMEDIATE_WEI_SUBJECT: &str =
     "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Intermediate CA (WEI)";
 const LOCAL_UI_HOST: &str = "neomist.localhost";
-const IPFS_UI_HOST: &str = "ipfs.localhost";
-const LOCAL_UI_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_UI_HOST];
+const IPFS_API_HOST: &str = "ipfs.localhost";
+const IPFS_GATEWAY_WILDCARD_HOST: &str = "*.ipfs.localhost";
+const LOCAL_UI_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST];
+const LOCAL_UI_CERT_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST, IPFS_GATEWAY_WILDCARD_HOST];
 
 #[derive(Debug)]
 pub struct CertManager {
@@ -60,7 +62,7 @@ impl CertManager {
 
         if have_base {
             if is_ec_key(&self.server_key_path)? {
-                if leaf_cert_ok(&self.ethereum_cert_path, LOCAL_UI_HOSTS)? {
+                if leaf_cert_ok(&self.ethereum_cert_path, LOCAL_UI_CERT_HOSTS)? {
                     return Ok(());
                 }
             }
@@ -97,7 +99,7 @@ impl CertManager {
             &self.server_key_path,
             &self.ethereum_cert_path,
             LOCAL_UI_HOST,
-            LOCAL_UI_HOSTS.to_vec(),
+            LOCAL_UI_CERT_HOSTS.to_vec(),
         )?;
 
         fs::remove_file(&root_key_path).wrap_err("Failed to delete temp root key")?;
@@ -125,7 +127,8 @@ impl CertManager {
         host: &str,
     ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         let host = host.to_lowercase();
-        if LOCAL_UI_HOSTS.iter().any(|candidate| host == *candidate) {
+        if LOCAL_UI_HOSTS.iter().any(|candidate| host == *candidate) || is_ipfs_gateway_host(&host)
+        {
             return load_leaf_chain(
                 &self.ethereum_cert_path,
                 &self.root_cert_path,
@@ -352,7 +355,9 @@ fn create_leaf_cert(
     }
 
     let ext_path = cert_out.with_extension("cnf");
-    let mut ext = String::from("[v3_req]\nbasicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = @alt_names\n\n[alt_names]\n");
+    let mut ext = String::from(
+        "[v3_req]\nbasicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = @alt_names\n\n[alt_names]\n",
+    );
     for (idx, san) in sans.iter().enumerate() {
         ext.push_str(&format!("DNS.{} = {}\n", idx + 1, san));
     }
@@ -420,6 +425,13 @@ fn leaf_cert_ok(path: &Path, expected_hosts: &[&str]) -> Result<bool> {
         && !stdout.contains("Key Encipherment")
         && stdout.contains("Extended Key Usage")
         && stdout.contains("TLS Web Server Authentication"))
+}
+
+fn is_ipfs_gateway_host(host: &str) -> bool {
+    let Some(prefix) = host.strip_suffix(".ipfs.localhost") else {
+        return false;
+    };
+    !prefix.is_empty() && !prefix.contains('.')
 }
 
 fn base_domain_pattern(host: &str, tld: &str) -> Result<String> {

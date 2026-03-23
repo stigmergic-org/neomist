@@ -2,32 +2,30 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{
+    Request, Response, StatusCode,
     header::{CACHE_CONTROL, CONTENT_TYPE, HOST},
-    Request,
-    Response,
-    StatusCode,
 };
 use axum::response::{IntoResponse, Json};
 use axum::routing::{any, get, post};
-use axum::Router;
 use eyre::{Result, WrapErr};
-use include_dir::{File, Dir, include_dir};
+use hyper_util::rt::TokioIo;
+use include_dir::{Dir, File, include_dir};
 use mime_guess::from_path;
+use rustls::crypto::aws_lc_rs::sign::any_supported_type;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::{ServerConfig, sign::CertifiedKey};
-use rustls::crypto::aws_lc_rs::sign::any_supported_type;
-use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{error, info, warn};
 
-use crate::certs::CertManager;
 use crate::cache;
-use crate::config::{save_config, AppConfig};
+use crate::certs::CertManager;
+use crate::config::{AppConfig, save_config};
 use crate::ens;
 use crate::state::AppState;
 
@@ -43,7 +41,9 @@ struct SaveResponse {
 }
 
 pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager>) -> Result<()> {
-    info!("Starting HTTPS server for node.localhost, neomist.localhost, and ipfs.localhost");
+    info!(
+        "Starting HTTPS server for node.localhost, neomist.localhost, ipfs.localhost, and *.ipfs.localhost"
+    );
     let eth_router = Router::new()
         .route("/rpc", post(proxy_rpc))
         .route("/health", get(healthcheck))
@@ -62,9 +62,14 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         .route("/*path", any(ens_lookup))
         .with_state(state.clone());
 
-    let ipfs_router = Router::new()
-        .route("/", any(proxy_ipfs))
-        .route("/*path", any(proxy_ipfs))
+    let ipfs_api_router = Router::new()
+        .route("/", any(proxy_ipfs_api))
+        .route("/*path", any(proxy_ipfs_api))
+        .with_state(state.clone());
+
+    let ipfs_gateway_router = Router::new()
+        .route("/", any(proxy_ipfs_gateway))
+        .route("/*path", any(proxy_ipfs_gateway))
         .with_state(state.clone());
 
     let primary_addr = SocketAddr::from(([0, 0, 0, 0], PRIMARY_HTTPS_PORT));
@@ -96,7 +101,8 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         let acceptor = acceptor.clone();
         let eth_router = eth_router.clone();
         let ens_router = ens_router.clone();
-        let ipfs_router = ipfs_router.clone();
+        let ipfs_api_router = ipfs_api_router.clone();
+        let ipfs_gateway_router = ipfs_gateway_router.clone();
 
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(stream).await {
@@ -107,56 +113,67 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
                 }
             };
 
-            let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let eth_router = eth_router.clone();
-                let ens_router = ens_router.clone();
-                let ipfs_router = ipfs_router.clone();
+            let service =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let eth_router = eth_router.clone();
+                    let ens_router = ens_router.clone();
+                    let ipfs_api_router = ipfs_api_router.clone();
+                    let ipfs_gateway_router = ipfs_gateway_router.clone();
 
-                async move {
-                    let req = req.map(Body::new);
-                    let host = req
-                        .headers()
-                        .get(HOST)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("")
-                        .to_lowercase();
+                    async move {
+                        let req = req.map(Body::new);
+                        let host = req
+                            .headers()
+                            .get(HOST)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_lowercase();
+                        let host_only = host_without_port(&host);
 
-                    if host.starts_with("neomist.localhost") {
-                        match eth_router.oneshot(req).await {
-                            Ok(resp) => Ok::<_, Infallible>(resp),
-                            Err(_) => Ok(Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(Body::from("UI routing error"))
-                                .unwrap()),
+                        if host_only == "neomist.localhost" {
+                            match eth_router.oneshot(req).await {
+                                Ok(resp) => Ok::<_, Infallible>(resp),
+                                Err(_) => Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("UI routing error"))
+                                    .unwrap()),
+                            }
+                        } else if host_only == "ipfs.localhost" {
+                            match ipfs_api_router.oneshot(req).await {
+                                Ok(resp) => Ok::<_, Infallible>(resp),
+                                Err(_) => Ok(Response::builder()
+                                    .status(StatusCode::BAD_GATEWAY)
+                                    .body(Body::from("IPFS API routing error"))
+                                    .unwrap()),
+                            }
+                        } else if is_ipfs_gateway_host(host_only) {
+                            match ipfs_gateway_router.oneshot(req).await {
+                                Ok(resp) => Ok::<_, Infallible>(resp),
+                                Err(_) => Ok(Response::builder()
+                                    .status(StatusCode::BAD_GATEWAY)
+                                    .body(Body::from("IPFS gateway routing error"))
+                                    .unwrap()),
+                            }
+                        } else if host_only.ends_with(".eth.localhost")
+                            || host_only.ends_with(".wei.localhost")
+                            || host_only.ends_with(".eth")
+                            || host_only.ends_with(".wei")
+                        {
+                            match ens_router.oneshot(req).await {
+                                Ok(resp) => Ok::<_, Infallible>(resp),
+                                Err(_) => Ok(Response::builder()
+                                    .status(StatusCode::BAD_GATEWAY)
+                                    .body(Body::from("ENS routing error"))
+                                    .unwrap()),
+                            }
+                        } else {
+                            Ok(Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::from("Unknown host"))
+                                .unwrap())
                         }
-                    } else if host.starts_with("ipfs.localhost") {
-                        match ipfs_router.oneshot(req).await {
-                            Ok(resp) => Ok::<_, Infallible>(resp),
-                            Err(_) => Ok(Response::builder()
-                                .status(StatusCode::BAD_GATEWAY)
-                                .body(Body::from("IPFS routing error"))
-                                .unwrap()),
-                        }
-                    } else if host.ends_with(".eth.localhost")
-                        || host.ends_with(".wei.localhost")
-                        || host.ends_with(".eth")
-                        || host.ends_with(".wei")
-                    {
-                        match ens_router.oneshot(req).await {
-                            Ok(resp) => Ok::<_, Infallible>(resp),
-                            Err(_) => Ok(Response::builder()
-                                .status(StatusCode::BAD_GATEWAY)
-                                .body(Body::from("ENS routing error"))
-                                .unwrap()),
-                        }
-                    } else {
-                        Ok(Response::builder()
-                            .status(StatusCode::NOT_FOUND)
-                            .body(Body::from("Unknown host"))
-                            .unwrap())
                     }
-                }
-            });
+                });
 
             let io = TokioIo::new(tls_stream);
             if let Err(err) = hyper::server::conn::http1::Builder::new()
@@ -280,10 +297,7 @@ async fn get_total_storage(State(state): State<AppState>) -> Response<Body> {
     }
 }
 
-async fn toggle_auto_seed(
-    State(state): State<AppState>,
-    req: Request<Body>,
-) -> Response<Body> {
+async fn toggle_auto_seed(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
     let query = req.uri().query().unwrap_or("");
     let params: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(query.as_bytes())
@@ -315,10 +329,7 @@ async fn toggle_auto_seed(
     }
 }
 
-async fn clear_cache(
-    State(state): State<AppState>,
-    req: Request<Body>,
-) -> Response<Body> {
+async fn clear_cache(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
     let query = req.uri().query().unwrap_or("");
     let params: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(query.as_bytes())
@@ -333,8 +344,9 @@ async fn clear_cache(
                 .unwrap();
         }
     };
+    let version = params.get("version").map(String::as_str);
 
-    match cache::clear_cache(&state, domain).await {
+    match cache::clear_cache(&state, domain, version).await {
         Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
         Err(err) => {
             error!("Failed to clear cache: {err}");
@@ -356,7 +368,7 @@ async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> im
     ens::proxy_request(&state, request).await
 }
 
-async fn proxy_ipfs(State(state): State<AppState>, request: Request<Body>) -> Response<Body> {
+async fn proxy_ipfs_api(State(state): State<AppState>, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     if parts.uri.path() == "/webui" {
         return Response::builder()
@@ -366,12 +378,66 @@ async fn proxy_ipfs(State(state): State<AppState>, request: Request<Body>) -> Re
             .unwrap();
     }
 
-    let mut url = format!("{}{}", state.ipfs_api_url.trim_end_matches('/'), parts.uri.path());
+    let mut url = format!(
+        "{}{}",
+        state.ipfs_api_url.trim_end_matches('/'),
+        parts.uri.path()
+    );
     if let Some(query) = parts.uri.query() {
         url.push('?');
         url.push_str(query);
     }
 
+    proxy_ipfs_request(
+        parts,
+        body,
+        url,
+        "IPFS request failed",
+        "IPFS response failed",
+    )
+    .await
+}
+
+async fn proxy_ipfs_gateway(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let host = parts
+        .headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    let host_only = host_without_port(&host);
+
+    let mut url = format!(
+        "http://{host_only}:{}{}",
+        state.ipfs_gateway_port,
+        parts.uri.path()
+    );
+    if let Some(query) = parts.uri.query() {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    proxy_ipfs_request(
+        parts,
+        body,
+        url,
+        "IPFS gateway request failed",
+        "IPFS gateway response failed",
+    )
+    .await
+}
+
+async fn proxy_ipfs_request(
+    parts: axum::http::request::Parts,
+    body: Body,
+    url: String,
+    request_error: &'static str,
+    response_error: &'static str,
+) -> Response<Body> {
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -415,7 +481,7 @@ async fn proxy_ipfs(State(state): State<AppState>, request: Request<Body>) -> Re
         Err(_) => {
             return Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from("IPFS request failed"))
+                .body(Body::from(request_error))
                 .unwrap();
         }
     };
@@ -442,9 +508,20 @@ async fn proxy_ipfs(State(state): State<AppState>, request: Request<Body>) -> Re
         Ok(bytes) => builder.body(Body::from(bytes)).unwrap(),
         Err(_) => Response::builder()
             .status(StatusCode::BAD_GATEWAY)
-            .body(Body::from("IPFS response failed"))
+            .body(Body::from(response_error))
             .unwrap(),
     }
+}
+
+fn host_without_port(host: &str) -> &str {
+    host.split(':').next().unwrap_or(host)
+}
+
+fn is_ipfs_gateway_host(host: &str) -> bool {
+    let Some(prefix) = host.strip_suffix(".ipfs.localhost") else {
+        return false;
+    };
+    !prefix.is_empty() && !prefix.contains('.')
 }
 
 fn ipfs_proxy_client() -> Option<&'static reqwest::Client> {

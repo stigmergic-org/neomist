@@ -3,8 +3,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc,
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -81,17 +80,12 @@ impl KuboManager {
     }
 }
 
-pub async fn init_kubo(
-    http_client: reqwest::Client,
-    base_dir: PathBuf,
-) -> Result<KuboManager> {
+pub async fn init_kubo(http_client: reqwest::Client, base_dir: PathBuf) -> Result<KuboManager> {
     tracing::info!("Starting IPFS (kubo)");
     tracing::info!("Checking for existing IPFS API on port {IPFS_API_PORT}");
     if check_existing_ipfs(&http_client).await {
         let gateway_port = fetch_gateway_port(&http_client).await.unwrap_or(8080);
-        tracing::info!(
-            "Using existing IPFS on port {IPFS_API_PORT} (gateway {gateway_port})"
-        );
+        tracing::info!("Using existing IPFS on port {IPFS_API_PORT} (gateway {gateway_port})");
         return Ok(KuboManager {
             gateway_port,
             ipfs_path: None,
@@ -135,9 +129,7 @@ async fn check_existing_ipfs(http_client: &reqwest::Client) -> bool {
 }
 
 async fn fetch_gateway_port(http_client: &reqwest::Client) -> Result<u16> {
-    let url = format!(
-        "http://127.0.0.1:{IPFS_API_PORT}/api/v0/config?arg=Addresses.Gateway"
-    );
+    let url = format!("http://127.0.0.1:{IPFS_API_PORT}/api/v0/config?arg=Addresses.Gateway");
     let response: serde_json::Value = http_client
         .post(url)
         .send()
@@ -191,8 +183,7 @@ async fn download_kubo(
         if ipfs_path.is_file() {
             return Ok(ipfs_path);
         }
-        fs::remove_dir_all(&ipfs_path)
-            .wrap_err("Failed to remove stale kubo directory")?;
+        fs::remove_dir_all(&ipfs_path).wrap_err("Failed to remove stale kubo directory")?;
     }
 
     let checksum_url = format!("{KUBO_DIST_BASE}/{KUBO_VERSION}/{checksum_name}");
@@ -235,8 +226,7 @@ async fn download_kubo(
 
     let extract_dir = download_dir.join(format!("kubo_{KUBO_VERSION}_{os}-{arch}"));
     if extract_dir.exists() {
-        fs::remove_dir_all(&extract_dir)
-            .wrap_err("Failed to clear kubo extract dir")?;
+        fs::remove_dir_all(&extract_dir).wrap_err("Failed to clear kubo extract dir")?;
     }
     fs::create_dir_all(&extract_dir).wrap_err("Failed to create kubo extract dir")?;
 
@@ -247,8 +237,7 @@ async fn download_kubo(
         .wrap_err("Failed to extract kubo archive")?;
 
     let extracted_binary = find_ipfs_binary(&extract_dir)?;
-    fs::copy(&extracted_binary, &ipfs_path)
-        .wrap_err("Failed to install kubo binary")?;
+    fs::copy(&extracted_binary, &ipfs_path).wrap_err("Failed to install kubo binary")?;
 
     set_ipfs_permissions(&ipfs_path)?;
     Ok(ipfs_path)
@@ -262,8 +251,7 @@ fn set_ipfs_permissions(ipfs_path: &Path) -> Result<()> {
             .wrap_err("Failed to stat kubo binary")?
             .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(ipfs_path, perms)
-            .wrap_err("Failed to set kubo permissions")?;
+        fs::set_permissions(ipfs_path, perms).wrap_err("Failed to set kubo permissions")?;
     }
 
     #[cfg(target_os = "macos")]
@@ -311,12 +299,11 @@ fn ensure_repo_initialized(ipfs_path: &Path, repo_dir: &Path) -> Result<()> {
 fn update_gateway_config(repo_dir: &Path, gateway_port: u16) -> Result<()> {
     let config_path = repo_dir.join("config");
     let contents = fs::read_to_string(&config_path).wrap_err("Failed to read kubo config")?;
-    let mut config: serde_json::Value = serde_json::from_str(&contents)
-        .wrap_err("Failed to parse kubo config")?;
+    let mut config: serde_json::Value =
+        serde_json::from_str(&contents).wrap_err("Failed to parse kubo config")?;
 
-    config["Addresses"]["Gateway"] = serde_json::Value::String(
-        format!("/ip4/127.0.0.1/tcp/{gateway_port}"),
-    );
+    config["Addresses"]["Gateway"] =
+        serde_json::Value::String(format!("/ip4/127.0.0.1/tcp/{gateway_port}"));
 
     config["API"]["HTTPHeaders"] = serde_json::json!({
         "Access-Control-Allow-Origin": [
@@ -328,8 +315,8 @@ fn update_gateway_config(repo_dir: &Path, gateway_port: u16) -> Result<()> {
         "Access-Control-Allow-Headers": ["X-Requested-With", "Content-Type"]
     });
 
-    let updated = serde_json::to_string_pretty(&config)
-        .wrap_err("Failed to serialize kubo config")?;
+    let updated =
+        serde_json::to_string_pretty(&config).wrap_err("Failed to serialize kubo config")?;
     fs::write(&config_path, updated).wrap_err("Failed to write kubo config")?;
     Ok(())
 }
