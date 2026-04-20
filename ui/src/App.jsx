@@ -644,6 +644,96 @@ function Header({ route, navigate, seedingCount }) {
   );
 }
 
+function useEnsSearch(query) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+
+  useEffect(() => {
+    const trimmed = query.trim().toLowerCase();
+    if (trimmed.length < 3) {
+      setSuggestions([]);
+      setIsSearching(false);
+      return;
+    }
+
+    let mounted = true;
+    setIsSearching(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        let skip = 0;
+        const limit = 100;
+        const maxSkip = 500;
+        let found = [];
+
+        while (found.length < 5 && skip < maxSkip && mounted) {
+          const response = await fetch('https://api.mainnet.ensnode.io/subgraph', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: `query Search($search: String!, $skip: Int!) {
+                domains(first: ${limit}, skip: $skip, where: { name_starts_with: $search, resolver_not: null }, orderBy: subdomainCount, orderDirection: desc) {
+                  name
+                  resolver {
+                    contentHash
+                  }
+                }
+              }`,
+              variables: { search: trimmed, skip },
+            }),
+          });
+
+          if (!response.ok) throw new Error('API error');
+          const { data } = await response.json();
+
+          if (!mounted) return;
+
+          if (data && data.domains) {
+            const valid = data.domains
+              .filter((d) => d.resolver?.contentHash?.startsWith('0xe3'))
+              .map((d) => d.name)
+              .filter((name) => name.toLowerCase().includes(trimmed));
+
+            for (const v of valid) {
+              if (!found.includes(v)) {
+                found.push(v);
+              }
+            }
+
+            if (mounted && found.length > 0) {
+              setSuggestions([...found].slice(0, 5));
+            }
+
+            if (found.length >= 5) {
+              break;
+            }
+
+            if (data.domains.length < limit) {
+              break;
+            }
+          } else {
+            break;
+          }
+
+          skip += limit;
+        }
+      } catch (err) {
+        console.warn('Failed to fetch ENS suggestions:', err);
+        if (mounted) setSuggestions([]);
+      } finally {
+        if (mounted) setIsSearching(false);
+      }
+    }, 300);
+
+    return () => {
+      mounted = false;
+      clearTimeout(timer);
+    };
+  }, [query]);
+
+  return { suggestions, isSearching };
+}
+
 function HomePage({
   openDapp,
   recentDomains,
@@ -659,10 +749,29 @@ function HomePage({
 }) {
   const [value, setValue] = useState('');
   const [inputError, setInputError] = useState('');
+  const [isFocused, setIsFocused] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(-1);
   const inputRef = useRef(null);
+  const containerRef = useRef(null);
+
+  const { suggestions, isSearching } = useEnsSearch(value);
 
   useEffect(() => {
     inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    setSelectedIndex(-1);
+  }, [suggestions]);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
+        setIsFocused(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   useEffect(() => {
@@ -719,22 +828,82 @@ function HomePage({
             resolving everything locally, giving you true, trustless access to dapps.
           </p>
 
-          <form onSubmit={handleSubmit} className="mt-10 grid grid-cols-[minmax(0,1fr)_auto] gap-3">
-            <input
-              ref={inputRef}
-              value={value}
-              onChange={(event) => {
-                setValue(event.target.value);
-                if (inputError) {
-                  setInputError('');
-                }
-              }}
-              className={INPUT_CLASS}
-              placeholder="app.eth or app.wei"
-              aria-label="Dapp domain"
-              autoComplete="off"
-              spellCheck="false"
-            />
+          <form onSubmit={handleSubmit} className="mt-10 grid grid-cols-[minmax(0,1fr)_auto] gap-3 relative" ref={containerRef}>
+            <div className="relative">
+              <input
+                ref={inputRef}
+                value={value}
+                onFocus={() => setIsFocused(true)}
+                onKeyDown={(event) => {
+                  if (!isFocused || suggestions.length === 0) return;
+
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    setSelectedIndex((prev) => (prev < suggestions.length - 1 ? prev + 1 : prev));
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setSelectedIndex((prev) => (prev > 0 ? prev - 1 : -1));
+                  } else if (event.key === 'Enter' && selectedIndex >= 0) {
+                    event.preventDefault();
+                    const selected = suggestions[selectedIndex];
+                    setValue(selected);
+                    setIsFocused(false);
+                    openDapp(selected);
+                  }
+                }}
+                onChange={(event) => {
+                  setValue(event.target.value);
+                  setIsFocused(true);
+                  if (inputError) {
+                    setInputError('');
+                  }
+                }}
+                className={INPUT_CLASS}
+                placeholder="app.eth or app.wei"
+                aria-label="Dapp domain"
+                autoComplete="off"
+                spellCheck="false"
+              />
+
+              {isFocused && (value.trim().length >= 3) && (suggestions.length > 0 || isSearching) && (
+                <div className="absolute left-0 top-[calc(100%+8px)] z-50 w-full overflow-hidden rounded-xl border border-base-300/70 bg-base-100 shadow-xl">
+                  {isSearching && suggestions.length === 0 ? (
+                    <div className="flex items-center gap-3 px-4 py-3 text-sm text-base-content/55">
+                      <span className="loading loading-spinner loading-sm" />
+                      Searching...
+                    </div>
+                  ) : (
+                    <ul className="py-1">
+                      {suggestions.map((suggestion, index) => (
+                        <li key={suggestion}>
+                          <button
+                            type="button"
+                            className={classNames(
+                              'w-full px-4 py-2.5 text-left text-sm transition',
+                              selectedIndex === index ? 'bg-base-200/80 text-primary' : 'hover:bg-base-200/50'
+                            )}
+                            onMouseEnter={() => setSelectedIndex(index)}
+                            onClick={() => {
+                              setValue(suggestion);
+                              setIsFocused(false);
+                              openDapp(suggestion);
+                            }}
+                          >
+                            {suggestion}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  
+                  {isSearching && suggestions.length > 0 ? (
+                    <div className="absolute right-3 top-3">
+                      <span className="loading loading-spinner loading-xs text-base-content/40" />
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
 
             <button type="submit" className={PRIMARY_BUTTON_CLASS}>
               Open
@@ -1014,17 +1183,11 @@ function SeedingPage({
         return true;
       })
       .sort((left, right) => {
-        // 1. Following on top
-        if (left.auto_seeding && !right.auto_seeding) return -1;
-        if (!left.auto_seeding && right.auto_seeding) return 1;
-
-        // 2. Sort by cached_at (newest first)
         const timeCompare = (right.cached_at || '').localeCompare(left.cached_at || '');
         if (timeCompare !== 0) {
           return timeCompare;
         }
 
-        // 3. Fallback to alphabetical
         return left.domain.localeCompare(right.domain);
       });
   }, [domains, filter, search]);
@@ -1034,8 +1197,8 @@ function SeedingPage({
 
   const filters = [
     { id: 'all', label: 'All' },
-    { id: 'partial', label: 'Partial' },
     { id: 'following', label: 'Following' },
+    { id: 'partial', label: 'Partial' },
   ];
 
   const toggleLatestTracking = async (domain, current) => {
