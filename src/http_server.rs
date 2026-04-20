@@ -227,7 +227,7 @@ async fn serve_ui(req: Request<Body>) -> Response<Body> {
         return file_response(asset_path, file);
     }
 
-    if asset_path.starts_with("assets/") || asset_path.contains('.') {
+    if asset_path.starts_with("assets/") || asset_path.ends_with(".js") || asset_path.ends_with(".css") {
         return not_found();
     }
 

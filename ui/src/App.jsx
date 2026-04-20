@@ -1,23 +1,12 @@
 import { generateFoamSvg } from '@simplepg/foam-identicon';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-const exploreLinks = [
-  'dex.wei',
-  'ens.eth',
-  'simplepage.eth',
-  'jthor.eth',
-  'walletbeat.eth',
-  'vitalik.eth',
-];
-
-const tabs = [
-  { id: 'explore', label: 'Explore' },
-  { id: 'cache', label: 'Cache' },
-  { id: 'settings', label: 'Settings' },
-];
-
-const CHECKPOINT_ICON_SIZE = 36;
+const STARTER_DOMAINS = ['dex.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth'];
 const CHECKPOINT_REFRESH_MS = 60000;
+const SEEDING_REFRESH_MS = 30000;
+const RECENT_STORAGE_KEY = 'neomist.recent-domains';
+const MAX_RECENT_DOMAINS = 8;
+const CHECKPOINT_ICON_SIZE = 32;
 const FOAM_PALETTE_OVERRIDES = {
   '--color-base-content': 'oklch(var(--bc))',
   '--color-primary': 'oklch(var(--p))',
@@ -29,20 +18,39 @@ const FOAM_PALETTE_OVERRIDES = {
   '--color-error': 'oklch(var(--er))',
 };
 
-const formatCheckpoint = (hash) => {
+const PANEL_CLASS =
+  'rounded-2xl border border-base-300/70 bg-base-100/80 shadow-sm backdrop-blur';
+const SUBTLE_PANEL_CLASS =
+  'rounded-xl border border-base-300/60 bg-base-100/60 shadow-sm backdrop-blur';
+const PRIMARY_BUTTON_CLASS =
+  'inline-flex h-12 items-center justify-center rounded-xl bg-primary px-5 text-sm font-medium text-primary-content transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50';
+const SECONDARY_BUTTON_CLASS =
+  'inline-flex h-12 items-center justify-center rounded-xl border border-base-300 bg-base-100/80 px-5 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/50 disabled:cursor-not-allowed disabled:opacity-50';
+const SMALL_SECONDARY_BUTTON_CLASS =
+  'inline-flex h-10 items-center justify-center rounded-lg border border-base-300 bg-base-100/75 px-4 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/50 disabled:cursor-not-allowed disabled:opacity-50';
+const ICON_BUTTON_CLASS =
+  'inline-flex h-11 w-11 items-center justify-center rounded-xl border border-base-300 bg-base-100/75 text-base-content transition hover:border-base-content/15 hover:bg-base-200/50 disabled:cursor-not-allowed disabled:opacity-50';
+const INPUT_CLASS =
+  'h-14 w-full rounded-xl border border-base-300 bg-base-100/85 px-4 text-base outline-none transition placeholder:text-base-content/35 focus:border-primary/45 focus:bg-base-100';
+
+function classNames(...values) {
+  return values.filter(Boolean).join(' ');
+}
+
+function formatCheckpoint(hash) {
   if (typeof hash !== 'string') {
     return '';
   }
-  if (hash.startsWith('0x') && hash.length > 10) {
-    return `${hash.slice(0, 6)}...${hash.slice(-4)}`;
+  if (hash.startsWith('0x') && hash.length > 14) {
+    return `${hash.slice(0, 10)}...${hash.slice(-6)}`;
   }
-  if (hash.length > 8) {
-    return `${hash.slice(0, 4)}...${hash.slice(-4)}`;
+  if (hash.length > 12) {
+    return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
   }
   return hash;
-};
+}
 
-const formatBytes = (value) => {
+function formatBytes(value) {
   if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
     return '-';
   }
@@ -53,6 +61,7 @@ const formatBytes = (value) => {
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
   let size = value;
   let unitIndex = 0;
+
   while (size >= 1024 && unitIndex < units.length - 1) {
     size /= 1024;
     unitIndex += 1;
@@ -61,231 +70,338 @@ const formatBytes = (value) => {
   if (unitIndex === 0) {
     return `${Math.round(size)} ${units[unitIndex]}`;
   }
+
   return `${size.toFixed(2)} ${units[unitIndex]}`;
-};
+}
 
-const sizeTooltip =
-  "Doesn't deduplicate blocks, so repeated content across cached versions can be counted more than once.";
+function formatTimestamp(value) {
+  if (!value) {
+    return 'Unknown';
+  }
 
-function SizeHeader({ label }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span>{label}</span>
-      <div className="tooltip tooltip-bottom" data-tip={sizeTooltip}>
-        <span className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-base-content/30 text-[10px] leading-none opacity-70">
-          i
-        </span>
-      </div>
-    </div>
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date);
+}
+
+function shortCid(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+  if (value.length <= 18) {
+    return value;
+  }
+  return `${value.slice(0, 10)}...${value.slice(-6)}`;
+}
+
+function decodeRouteSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseRoute(pathname) {
+  const normalized = pathname === '/' ? '/' : pathname.replace(/\/+$/, '');
+
+  if (normalized === '/' || normalized === '') {
+    return { page: 'home', domain: '' };
+  }
+
+  if (normalized === '/settings') {
+    return { page: 'settings', domain: '' };
+  }
+
+  if (normalized === '/seeding') {
+    return { page: 'seeding', domain: '' };
+  }
+
+  if (normalized.startsWith('/seeding/')) {
+    return {
+      page: 'seeding',
+      domain: decodeRouteSegment(normalized.slice('/seeding/'.length)),
+    };
+  }
+
+  return { page: 'not-found', domain: '' };
+}
+
+function toSeedingPath(domain) {
+  return `/seeding/${encodeURIComponent(domain)}`;
+}
+
+function isSupportedDappHost(hostname) {
+  const host = hostname.toLowerCase();
+  return host.endsWith('.eth') || host.endsWith('.wei');
+}
+
+function toRecentDisplay(url) {
+  const host = url.hostname.toLowerCase();
+  const suffix = `${url.pathname}${url.search}${url.hash}`;
+  return suffix === '/' ? host : `${host}${suffix}`;
+}
+
+function normalizeDappInput(value) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { ok: false, error: 'Enter a .eth or .wei domain.' };
+  }
+
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return { ok: false, error: 'Enter a valid .eth or .wei domain.' };
+  }
+
+  if (!isSupportedDappHost(url.hostname)) {
+    return { ok: false, error: 'Only .eth and .wei domains are supported.' };
+  }
+
+  url.protocol = 'https:';
+
+  return {
+    ok: true,
+    url: url.toString(),
+    recentValue: toRecentDisplay(url),
+    domain: url.hostname.toLowerCase(),
+  };
+}
+
+function readRecentDomains() {
+  try {
+    const raw = window.localStorage.getItem(RECENT_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((value) => typeof value === 'string').slice(0, MAX_RECENT_DOMAINS);
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentDomains(values) {
+  try {
+    window.localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(values));
+  } catch {
+    // noop
+  }
+}
+
+function upsertRecentDomain(currentValues, nextValue) {
+  return [nextValue, ...currentValues.filter((value) => value !== nextValue)].slice(
+    0,
+    MAX_RECENT_DOMAINS
   );
 }
 
-function App() {
-  const [activeTab, setActiveTab] = useState('explore');
+function getCoverage(localSize, fullSize) {
+  const local = typeof localSize === 'number' && localSize > 0 ? localSize : 0;
+  const full = typeof fullSize === 'number' && fullSize > 0 ? fullSize : 0;
+
+  if (full === 0) {
+    return {
+      ratio: local > 0 ? 1 : 0,
+      label: local > 0 ? 'Stored' : 'Unknown',
+      detail: local > 0 ? `${formatBytes(local)} stored` : 'Size unavailable',
+      tone: local > 0 ? 'success' : 'neutral',
+      isPartial: false,
+      isComplete: local > 0,
+    };
+  }
+
+  const ratio = Math.max(0, Math.min(local / full, 1));
+  const percent = Math.round(ratio * 100);
+
+  if (ratio >= 0.999) {
+    return {
+      ratio: 1,
+      label: 'Complete',
+      detail: '100% cached',
+      tone: 'success',
+      isPartial: false,
+      isComplete: true,
+    };
+  }
+
+  if (ratio === 0) {
+    return {
+      ratio: 0,
+      label: 'Pending',
+      detail: '0% cached',
+      tone: 'warning',
+      isPartial: true,
+      isComplete: false,
+    };
+  }
+
+  return {
+    ratio,
+    label: 'Partial',
+    detail: `${percent}% cached`,
+    tone: 'warning',
+    isPartial: true,
+    isComplete: false,
+  };
+}
+
+function buildSeedingSummary(domains) {
+  let following = 0;
+  let partial = 0;
+  let complete = 0;
+
+  for (const domain of domains) {
+    if (domain.auto_seeding) {
+      following += 1;
+    }
+
+    const coverage = getCoverage(domain.local_size, domain.full_size);
+    if (coverage.isPartial) {
+      partial += 1;
+    }
+    if (coverage.isComplete) {
+      complete += 1;
+    }
+  }
+
+  return {
+    total: domains.length,
+    following,
+    partial,
+    complete,
+  };
+}
+
+function latestTrackingStatus(enabled) {
+  return enabled ? 'Following' : 'Cached';
+}
+
+function latestTrackingAction(enabled) {
+  return enabled ? 'Stop following' : 'Follow';
+}
+
+function checkpointExplorerUrl(hash) {
+  return `https://beaconcha.in/slot/${encodeURIComponent(hash)}`;
+}
+
+function openInNewTab(url) {
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+function useBrowserPath() {
+  const [pathname, setPathname] = useState(() => window.location.pathname);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setPathname(window.location.pathname);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
+  const navigate = (path, options = {}) => {
+    if (!path || path === window.location.pathname) {
+      return;
+    }
+
+    const method = options.replace ? 'replaceState' : 'pushState';
+    window.history[method]({}, '', path);
+    setPathname(path);
+    window.scrollTo({ top: 0, left: 0 });
+  };
+
+  return { pathname, navigate };
+}
+
+function useCheckpoints() {
   const [checkpoints, setCheckpoints] = useState([]);
-  const [checkpointError, setCheckpointError] = useState('');
+  const [error, setError] = useState('');
 
   useEffect(() => {
     let mounted = true;
 
-    const loadCheckpoints = async () => {
+    const load = async () => {
       try {
         const response = await fetch('/api/helios/checkpoints');
         if (!response.ok) {
           throw new Error('Failed to load checkpoints');
         }
+
         const data = await response.json();
-        if (!mounted) return;
+        if (!mounted) {
+          return;
+        }
+
         setCheckpoints(Array.isArray(data.checkpoints) ? data.checkpoints : []);
-        setCheckpointError('');
-      } catch (err) {
-        if (!mounted) return;
+        setError('');
+      } catch {
+        if (!mounted) {
+          return;
+        }
+
         setCheckpoints([]);
-        setCheckpointError('Failed to load checkpoints.');
+        setError('Failed to load checkpoints.');
       }
     };
 
-    loadCheckpoints();
-    const interval = window.setInterval(loadCheckpoints, CHECKPOINT_REFRESH_MS);
+    void load();
+    const interval = window.setInterval(() => {
+      void load();
+    }, CHECKPOINT_REFRESH_MS);
+
     return () => {
       mounted = false;
       window.clearInterval(interval);
     };
   }, []);
 
-  return (
-    <div className="min-h-screen">
-      <div className="mx-auto max-w-6xl px-4 pb-16 pt-10">
-        <Header checkpoints={checkpoints} checkpointError={checkpointError} />
-
-        <div className="mt-8 animate-rise stagger-1">
-          <div className="tabs tabs-boxed bg-base-200/70 p-1 shadow-inner">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                className={`tab ${activeTab === tab.id ? 'tab-active' : ''}`}
-                onClick={() => setActiveTab(tab.id)}
-                type="button"
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-6">
-          {activeTab === 'explore' && <ExploreTab />}
-          {activeTab === 'cache' && <CacheTab />}
-          {activeTab === 'settings' && <SettingsTab />}
-        </div>
-      </div>
-    </div>
-  );
+  return { checkpoints, error };
 }
 
-function Header({ checkpoints, checkpointError }) {
-  const checkpointIcons = useMemo(
-    () =>
-      checkpoints.map((hash) => ({
-        hash,
-        svg: generateFoamSvg(hash, CHECKPOINT_ICON_SIZE, {
-          paletteOverrides: FOAM_PALETTE_OVERRIDES,
-        }),
-      })),
-    [checkpoints]
-  );
-  const [copiedHash, setCopiedHash] = useState('');
-  const copyTimeoutRef = useRef(null);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimeoutRef.current) {
-        window.clearTimeout(copyTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  const copyCheckpoint = async (hash) => {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(hash);
-      } else {
-        const textarea = document.createElement('textarea');
-        textarea.value = hash;
-        textarea.setAttribute('readonly', '');
-        textarea.style.position = 'absolute';
-        textarea.style.left = '-9999px';
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
-      }
-    } catch (err) {
-      // noop
-    }
-    setCopiedHash(hash);
-    if (copyTimeoutRef.current) {
-      window.clearTimeout(copyTimeoutRef.current);
-    }
-    copyTimeoutRef.current = window.setTimeout(() => {
-      setCopiedHash('');
-    }, 5000);
-  };
-
-  return (
-    <section className="relative overflow-hidden rounded-3xl border border-base-300 bg-base-100/80 p-6 shadow-2xl backdrop-blur animate-rise">
-      <div className="pointer-events-none absolute inset-0 opacity-50">
-        <div className="absolute -left-16 top-0 h-40 w-40 rounded-full bg-primary/30 blur-3xl" />
-        <div className="absolute right-0 top-10 h-32 w-32 rounded-full bg-secondary/30 blur-3xl" />
-      </div>
-
-      <div className="relative z-10 flex flex-col gap-6">
-        <div className="flex items-center gap-3">
-          <picture>
-            <source srcSet="/icon-dark.svg" media="(prefers-color-scheme: dark)" />
-            <img src="/icon.svg" alt="NeoMist icon" className="h-11 w-11" />
-          </picture>
-          <h1 className="text-3xl font-semibold md:text-4xl">NeoMist Dashboard</h1>
-        </div>
-
-        <div className="rounded-2xl border border-base-300 bg-base-200/60 p-4">
-          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-            <p className="font-medium">Latest checkpoints</p>
-            <span className="text-xs uppercase tracking-[0.18em] opacity-60">
-              Compare with friends to ensure you are on the canonical chain
-            </span>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {checkpointError ? (
-              <span className="text-sm text-error">{checkpointError}</span>
-            ) : checkpoints.length === 0 ? (
-              <span className="text-sm opacity-60">No checkpoints yet.</span>
-            ) : (
-              checkpointIcons.map(({ hash, svg }) => (
-                <div
-                  key={hash}
-                  className="tooltip tooltip-bottom"
-                  data-tip={copiedHash === hash ? 'Copied!' : formatCheckpoint(hash)}
-                >
-                  <button
-                    type="button"
-                    onClick={() => copyCheckpoint(hash)}
-                    className="inline-flex h-9 w-9 items-center justify-center"
-                    aria-label={`Copy checkpoint ${hash}`}
-                  >
-                    <span
-                      role="img"
-                      aria-hidden="true"
-                      className="mask mask-squircle h-9 w-9"
-                      dangerouslySetInnerHTML={{ __html: svg }}
-                    />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function ExploreTab() {
-  return (
-    <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 animate-rise stagger-2">
-      {exploreLinks.map((domain) => (
-        <a
-          key={domain}
-          href={`https://${domain}`}
-          target="_blank"
-          rel="noreferrer"
-          className="rounded-2xl border border-base-300 bg-base-100/80 p-5 shadow-lg transition-colors hover:border-primary/50"
-        >
-          <div className="flex items-start justify-between">
-            <div>
-              <p className="text-xs uppercase tracking-[0.3em] opacity-60">Explore</p>
-              <h3 className="mt-2 text-xl font-semibold">{domain}</h3>
-            </div>
-            <span className="badge badge-outline">Open</span>
-          </div>
-          <p className="mt-4 text-sm opacity-70">Open the site in a new tab.</p>
-        </a>
-      ))}
-    </section>
-  );
-}
-
-function CacheTab() {
+function useSeedingData() {
   const [domains, setDomains] = useState([]);
   const [storageUsed, setStorageUsed] = useState('-');
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
-  const [actionKey, setActionKey] = useState('');
-  const [expandedDomain, setExpandedDomain] = useState('');
+  const mountedRef = useRef(true);
+  const hasLoadedRef = useRef(false);
 
-  const loadCache = async () => {
-    setLoading(true);
-    setError('');
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  async function load(background = false) {
+    if (!hasLoadedRef.current) {
+      setLoading(true);
+    } else if (!background) {
+      setRefreshing(true);
+    }
+
     try {
       const [domainsRes, storageRes] = await Promise.all([
         fetch('/api/cached-domains'),
@@ -293,48 +409,652 @@ function CacheTab() {
       ]);
 
       if (!domainsRes.ok || !storageRes.ok) {
-        throw new Error('Failed to load cache');
+        throw new Error('Failed to load seeding data');
       }
 
       const domainsData = await domainsRes.json();
       const storageData = await storageRes.json();
-      const domainList = Array.isArray(domainsData) ? domainsData : [];
-      setDomains(domainList);
+
+      if (!mountedRef.current) {
+        return;
+      }
+
+      setDomains(Array.isArray(domainsData) ? domainsData : []);
       setStorageUsed(storageData.totalUsed || '-');
-      setExpandedDomain((current) =>
-        domainList.some((domain) => domain.domain === current) ? current : ''
-      );
-    } catch (err) {
-      setError('Failed to load cache.');
+      setError('');
+    } catch {
+      if (!mountedRef.current) {
+        return;
+      }
+
+      setError('Failed to load seeding data.');
     } finally {
+      if (!mountedRef.current) {
+        return;
+      }
+
+      hasLoadedRef.current = true;
       setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }
 
   useEffect(() => {
-    loadCache();
+    void load(false);
+    const interval = window.setInterval(() => {
+      void load(true);
+    }, SEEDING_REFRESH_MS);
+
+    return () => {
+      window.clearInterval(interval);
+    };
   }, []);
 
-  const toggleVersions = (domain) => {
-    setExpandedDomain((current) => (current === domain ? '' : domain));
+  return {
+    domains,
+    storageUsed,
+    loading,
+    refreshing,
+    error,
+    reload: () => load(false),
+  };
+}
+
+function App() {
+  const { pathname, navigate } = useBrowserPath();
+  const route = useMemo(() => parseRoute(pathname), [pathname]);
+  const { checkpoints, error: checkpointError } = useCheckpoints();
+  const {
+    domains,
+    storageUsed,
+    loading: seedingLoading,
+    error: seedingError,
+    reload: reloadSeeding,
+  } = useSeedingData();
+  const [recentDomains, setRecentDomains] = useState(() => readRecentDomains());
+
+  const seedingSummary = useMemo(() => buildSeedingSummary(domains), [domains]);
+
+  useEffect(() => {
+    if (route.page === 'home') {
+      document.title = 'NeoMist';
+      return;
+    }
+
+    if (route.page === 'seeding' && route.domain) {
+      document.title = `${route.domain} - NeoMist`;
+      return;
+    }
+
+    if (route.page === 'seeding') {
+      document.title = 'Seeding - NeoMist';
+      return;
+    }
+
+    if (route.page === 'settings') {
+      document.title = 'Settings - NeoMist';
+      return;
+    }
+
+    document.title = 'NeoMist';
+  }, [route]);
+
+  const rememberRecentTarget = (value) => {
+    const result = normalizeDappInput(value);
+    if (!result.ok) {
+      return result;
+    }
+
+    const nextValues = upsertRecentDomain(recentDomains, result.recentValue);
+    writeRecentDomains(nextValues);
+    setRecentDomains(nextValues);
+    return result;
   };
 
-  const toggleAuto = async (domain, current) => {
-    setActionKey(`auto:${domain}`);
-    setError('');
+  const openDapp = (value) => {
+    const result = rememberRecentTarget(value);
+    if (!result.ok) {
+      return result;
+    }
+
+    openInNewTab(result.url);
+    return result;
+  };
+
+  const clearRecent = () => {
+    writeRecentDomains([]);
+    setRecentDomains([]);
+  };
+
+  return (
+    <div className="min-h-screen">
+      <div className="mx-auto flex min-h-screen max-w-[1480px] flex-col px-6 pb-8 pt-6">
+        <Header route={route} navigate={navigate} seedingCount={seedingSummary.total} />
+
+        <main className="mt-6 flex-1 animate-rise">
+          {route.page === 'home' ? (
+            <HomePage
+              openDapp={openDapp}
+              recentDomains={recentDomains}
+              clearRecent={clearRecent}
+              navigate={navigate}
+              seedingSummary={seedingSummary}
+              seedingDomains={domains}
+              seedingLoading={seedingLoading}
+              seedingError={seedingError}
+              storageUsed={storageUsed}
+              checkpoints={checkpoints}
+              checkpointError={checkpointError}
+            />
+          ) : null}
+
+          {route.page === 'seeding' ? (
+            <SeedingPage
+              routeDomain={route.domain}
+              domains={domains}
+              storageUsed={storageUsed}
+              loading={seedingLoading}
+              error={seedingError}
+              summary={seedingSummary}
+              navigate={navigate}
+              reload={reloadSeeding}
+              rememberRecentTarget={rememberRecentTarget}
+            />
+          ) : null}
+
+          {route.page === 'settings' ? <SettingsPage /> : null}
+
+          {route.page === 'not-found' ? <NotFoundPage navigate={navigate} /> : null}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function Header({ route, navigate, seedingCount }) {
+  const openActive = route.page === 'home';
+  const seedingActive = route.page === 'seeding';
+  const settingsActive = route.page === 'settings';
+
+  return (
+    <header className={classNames(PANEL_CLASS, 'flex items-center justify-between px-5 py-4')}>
+      <button
+        type="button"
+        onClick={() => navigate('/')}
+        className="flex items-center gap-3 rounded-xl px-2 py-1 text-left transition hover:bg-base-200/40"
+      >
+        <picture>
+          <source srcSet="/icon-dark.svg" media="(prefers-color-scheme: dark)" />
+          <img src="/icon.svg" alt="NeoMist icon" className="h-10 w-10" />
+        </picture>
+
+        <div>
+          <p className="text-lg font-semibold tracking-tight">NeoMist</p>
+          <p className="text-sm text-base-content/60">Ethereum without middlemen</p>
+        </div>
+      </button>
+
+      <div className="flex items-center gap-3">
+        <nav className="flex items-center gap-1 rounded-full border border-base-300/70 bg-base-200/45 p-1">
+          <button
+            type="button"
+            aria-current={openActive ? 'page' : undefined}
+            className={classNames(
+              'rounded-full px-4 py-2 text-sm font-medium transition',
+              openActive
+                ? 'bg-base-100 text-base-content shadow'
+                : 'text-base-content/65 hover:text-base-content'
+            )}
+            onClick={() => navigate('/')}
+          >
+            Explore
+          </button>
+
+          <button
+            type="button"
+            aria-current={seedingActive ? 'page' : undefined}
+            className={classNames(
+              'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition',
+              seedingActive
+                ? 'bg-base-100 text-base-content shadow'
+                : 'text-base-content/65 hover:text-base-content'
+            )}
+            onClick={() => navigate('/seeding')}
+          >
+            <span>Seeding</span>
+            <span className="rounded-full bg-base-200 px-2 py-0.5 text-xs text-base-content/65">
+              {seedingCount}
+            </span>
+          </button>
+        </nav>
+
+        <button
+          type="button"
+          aria-label="Settings"
+          className={classNames(
+            ICON_BUTTON_CLASS,
+            settingsActive ? 'border-base-content/15 bg-base-200/60' : ''
+          )}
+          onClick={() => navigate('/settings')}
+        >
+          <SettingsIcon />
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function HomePage({
+  openDapp,
+  recentDomains,
+  clearRecent,
+  navigate,
+  seedingSummary,
+  seedingDomains,
+  seedingLoading,
+  seedingError,
+  storageUsed,
+  checkpoints,
+  checkpointError,
+}) {
+  const [value, setValue] = useState('');
+  const [inputError, setInputError] = useState('');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+
+      const target = event.target;
+      const isTypingTarget =
+        target instanceof HTMLElement &&
+        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/i.test(target.tagName));
+
+      if (isTypingTarget) {
+        return;
+      }
+
+      event.preventDefault();
+      inputRef.current?.focus();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    const result = openDapp(value);
+    if (!result.ok) {
+      setInputError(result.error);
+      return;
+    }
+
+    setInputError('');
+  };
+
+  return (
+    <div className="grid min-h-[calc(100vh-156px)] grid-cols-[minmax(0,1.15fr)_420px] gap-6">
+      <section className={classNames(PANEL_CLASS, 'relative overflow-hidden px-8 py-10')}>
+        <div className="pointer-events-none absolute inset-0 opacity-60">
+          <div className="absolute -left-20 top-0 h-72 w-72 rounded-full bg-primary/15 blur-3xl" />
+          <div className="absolute bottom-0 right-0 h-64 w-64 rounded-full bg-secondary/10 blur-3xl" />
+        </div>
+
+        <div className="relative z-10 max-w-3xl">
+          <h1 className="text-5xl font-semibold leading-[1.02] tracking-tight">
+            Explore the Ethereum ecosystem.
+          </h1>
+
+          <p className="mt-5 max-w-2xl text-base leading-7 text-base-content/70">
+            Type a .eth or .wei domain and press Enter. NeoMist bypasses centralized gateways by
+            resolving everything locally, giving you true, trustless access to dapps.
+          </p>
+
+          <form onSubmit={handleSubmit} className="mt-10 grid grid-cols-[minmax(0,1fr)_auto] gap-3">
+            <input
+              ref={inputRef}
+              value={value}
+              onChange={(event) => {
+                setValue(event.target.value);
+                if (inputError) {
+                  setInputError('');
+                }
+              }}
+              className={INPUT_CLASS}
+              placeholder="app.eth or app.wei"
+              aria-label="Dapp domain"
+              autoComplete="off"
+              spellCheck="false"
+            />
+
+            <button type="submit" className={PRIMARY_BUTTON_CLASS}>
+              Open
+            </button>
+          </form>
+
+          <p className={classNames('mt-3 text-sm', inputError ? 'text-error' : 'text-base-content/55')}>
+            {inputError || 'Press Enter to open in a new tab. Press / at any time to focus the field.'}
+          </p>
+
+          <div className="mt-12 rounded-2xl border border-base-300/60 bg-base-100/45 p-6 shadow-sm">
+            {recentDomains.length > 0 ? (
+              <div>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">Recently opened</p>
+                    <p className="mt-1 text-sm text-base-content/60">
+                      Jump back in.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="text-sm text-base-content/55 transition hover:text-base-content"
+                    onClick={clearRecent}
+                  >
+                    Clear recent
+                  </button>
+                </div>
+
+                <div className="mt-5 flex flex-wrap gap-3">
+                  {recentDomains.map((domain) => (
+                    <button
+                      key={domain}
+                      type="button"
+                      className="rounded-full border border-base-300 bg-base-100/80 px-4 py-2 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/45"
+                      onClick={() => openDapp(domain)}
+                    >
+                      {domain}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className={recentDomains.length > 0 ? 'mt-8 border-t border-base-300/60 pt-6' : ''}>
+              <p className="text-sm font-medium">Examples</p>
+              <p className="mt-1 text-sm text-base-content/60">
+                Common dapps you can open in one click.
+              </p>
+
+              <div className="mt-5 flex flex-wrap gap-3">
+                {STARTER_DOMAINS.map((domain) => (
+                  <button
+                    key={domain}
+                    type="button"
+                    className="rounded-full border border-base-300 bg-base-100/80 px-4 py-2 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/45"
+                    onClick={() => openDapp(domain)}
+                  >
+                    {domain}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside className="grid content-start gap-6">
+        <SeedingOverviewPanel
+          summary={seedingSummary}
+          domains={seedingDomains}
+          loading={seedingLoading}
+          error={seedingError}
+          storageUsed={storageUsed}
+          navigate={navigate}
+        />
+
+        <CheckpointPanel checkpoints={checkpoints} error={checkpointError} />
+      </aside>
+    </div>
+  );
+}
+
+function SeedingOverviewPanel({ summary, domains, loading, error, storageUsed, navigate }) {
+  const spotlightDomains = useMemo(() => {
+    return [...domains]
+      .sort((left, right) => {
+        const timeCompare = (right.cached_at || '').localeCompare(left.cached_at || '');
+        if (timeCompare !== 0) {
+          return timeCompare;
+        }
+
+        return left.domain.localeCompare(right.domain);
+      })
+      .slice(0, 3);
+  }, [domains]);
+
+  return (
+    <section className={classNames(PANEL_CLASS, 'p-6')}>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Seeding</h2>
+          <p className="mt-2 text-sm leading-6 text-base-content/65">
+            See what is fully stored, what is partial, and which domains follow the latest dapp
+            versions.
+          </p>
+        </div>
+
+        <button type="button" className={SMALL_SECONDARY_BUTTON_CLASS} onClick={() => navigate('/seeding')}>
+          Details
+        </button>
+      </div>
+
+      <div className="mt-6 grid grid-cols-2 gap-3">
+        <MetricTile label="Sites" value={summary.total} />
+        <MetricTile label="Following" value={summary.following} />
+        <MetricTile label="Partial" value={summary.partial} />
+        <MetricTile label="Storage" value={storageUsed} />
+      </div>
+
+      <div className="mt-6">
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm font-medium">Recently cached</p>
+          {loading ? <span className="text-xs text-base-content/50">Updating...</span> : null}
+        </div>
+
+        <div className="mt-4 grid gap-2">
+          {error ? (
+            <p className="text-sm text-error">{error}</p>
+          ) : spotlightDomains.length === 0 ? (
+            <p className="text-sm leading-6 text-base-content/60">
+              No sites cached yet. Open a dapp to start building local coverage.
+            </p>
+          ) : (
+            spotlightDomains.map((domain) => {
+              const coverage = getCoverage(domain.local_size, domain.full_size);
+
+              return (
+                <button
+                  key={domain.domain}
+                  type="button"
+                  className={classNames(
+                    SUBTLE_PANEL_CLASS,
+                    'w-full px-4 py-3 text-left transition hover:border-base-content/15 hover:bg-base-100/80'
+                  )}
+                  onClick={() => navigate(toSeedingPath(domain.domain))}
+                >
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium">{domain.domain}</p>
+                      <p className="mt-1 text-xs text-base-content/55">{formatTimestamp(domain.cached_at)}</p>
+                    </div>
+
+                    <StatusPill tone={domain.auto_seeding ? 'info' : 'neutral'}>
+                      {latestTrackingStatus(domain.auto_seeding)}
+                    </StatusPill>
+                  </div>
+
+                  <div className="mt-3 flex items-center gap-3">
+                    <div className="min-w-0 flex-1">
+                      <ProgressBar ratio={coverage.ratio} tone={coverage.tone} />
+                    </div>
+                    <StatusPill tone={coverage.tone}>{coverage.label}</StatusPill>
+                  </div>
+
+                  <p className="mt-2 text-xs text-base-content/55">
+                    {formatBytes(domain.local_size)} stored of {formatBytes(domain.full_size)}
+                  </p>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CheckpointPanel({ checkpoints, error }) {
+  const checkpointIcons = useMemo(
+    () =>
+      checkpoints.slice(0, 5).map((hash) => ({
+        hash,
+        svg: generateFoamSvg(hash, CHECKPOINT_ICON_SIZE, {
+          paletteOverrides: FOAM_PALETTE_OVERRIDES,
+        }),
+      })),
+    [checkpoints]
+  );
+
+  return (
+    <section className={classNames(PANEL_CLASS, 'p-6')}>
+      <h2 className="text-2xl font-semibold tracking-tight">Consensus checkpoints</h2>
+      <p className="mt-2 text-sm leading-6 text-base-content/65">
+        Open the latest checkpoints in a beacon explorer when you need to compare state with
+        another node.
+      </p>
+
+      <div className="mt-6 grid gap-3">
+        {error ? (
+          <p className="text-sm text-error">{error}</p>
+        ) : checkpoints.length === 0 ? (
+          <p className="text-sm leading-6 text-base-content/60">Waiting for checkpoints.</p>
+        ) : (
+          checkpointIcons.map(({ hash, svg }) => (
+            <a
+              key={hash}
+              href={checkpointExplorerUrl(hash)}
+              target="_blank"
+              rel="noreferrer"
+              className={classNames(
+                SUBTLE_PANEL_CLASS,
+                'flex items-center justify-between gap-4 px-4 py-3 text-left transition hover:border-base-content/15 hover:bg-base-100/80'
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg">
+                  <span
+                    role="img"
+                    aria-hidden="true"
+                    className="inline-flex h-8 w-8 [&>svg]:h-8 [&>svg]:w-8"
+                    dangerouslySetInnerHTML={{ __html: svg }}
+                  />
+                </span>
+                <span className="font-mono text-sm">{formatCheckpoint(hash)}</span>
+              </div>
+              <span className="text-xs text-base-content/55">Open explorer</span>
+            </a>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function SeedingPage({
+  routeDomain,
+  domains,
+  storageUsed,
+  loading,
+  error,
+  summary,
+  navigate,
+  reload,
+  rememberRecentTarget,
+}) {
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [actionKey, setActionKey] = useState('');
+  const [actionError, setActionError] = useState('');
+
+  const selectedDomain = useMemo(
+    () => domains.find((domain) => domain.domain === routeDomain) || null,
+    [domains, routeDomain]
+  );
+
+  const filteredDomains = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    return [...domains]
+      .filter((domain) => {
+        const coverage = getCoverage(domain.local_size, domain.full_size);
+
+        if (query && !domain.domain.toLowerCase().includes(query)) {
+          return false;
+        }
+
+        if (filter === 'partial' && !coverage.isPartial) {
+          return false;
+        }
+
+        if (filter === 'following' && !domain.auto_seeding) {
+          return false;
+        }
+
+        return true;
+      })
+      .sort((left, right) => {
+        // 1. Following on top
+        if (left.auto_seeding && !right.auto_seeding) return -1;
+        if (!left.auto_seeding && right.auto_seeding) return 1;
+
+        // 2. Sort by cached_at (newest first)
+        const timeCompare = (right.cached_at || '').localeCompare(left.cached_at || '');
+        if (timeCompare !== 0) {
+          return timeCompare;
+        }
+
+        // 3. Fallback to alphabetical
+        return left.domain.localeCompare(right.domain);
+      });
+  }, [domains, filter, search]);
+
+  const detailDomain = routeDomain ? selectedDomain : filteredDomains[0] || null;
+  const selectedMissing = Boolean(routeDomain) && !selectedDomain && !loading;
+
+  const filters = [
+    { id: 'all', label: 'All' },
+    { id: 'partial', label: 'Partial' },
+    { id: 'following', label: 'Following' },
+  ];
+
+  const toggleLatestTracking = async (domain, current) => {
+    setActionKey(`follow:${domain}`);
+    setActionError('');
+
     try {
       const response = await fetch(
         `/api/toggle-auto-seed?domain=${encodeURIComponent(domain)}&enable=${!current}`,
-        {
-          method: 'POST',
-        }
+        { method: 'POST' }
       );
+
       if (!response.ok) {
-        throw new Error('Failed to update auto-seed state');
+        throw new Error('Failed to update latest tracking');
       }
-      await loadCache();
-    } catch (err) {
-      setError('Failed to update auto-seed state.');
+
+      await reload();
+    } catch {
+      setActionError('Failed to update latest tracking.');
     } finally {
       setActionKey('');
     }
@@ -342,17 +1062,23 @@ function CacheTab() {
 
   const clearDomainCache = async (domain) => {
     setActionKey(`clear-domain:${domain}`);
-    setError('');
+    setActionError('');
+
     try {
       const response = await fetch(`/api/clear-cache?domain=${encodeURIComponent(domain)}`, {
         method: 'POST',
       });
+
       if (!response.ok) {
-        throw new Error('Failed to clear domain cache');
+        throw new Error('Failed to remove domain cache');
       }
-      await loadCache();
-    } catch (err) {
-      setError('Failed to remove cached domain.');
+
+      await reload();
+      if (routeDomain === domain) {
+        navigate('/seeding');
+      }
+    } catch {
+      setActionError('Failed to remove seeded site.');
     } finally {
       setActionKey('');
     }
@@ -360,7 +1086,8 @@ function CacheTab() {
 
   const clearVersionCache = async (domain, timestamp) => {
     setActionKey(`clear-version:${domain}:${timestamp}`);
-    setError('');
+    setActionError('');
+
     try {
       const response = await fetch(
         `/api/clear-cache?domain=${encodeURIComponent(domain)}&version=${encodeURIComponent(
@@ -370,260 +1097,396 @@ function CacheTab() {
           method: 'POST',
         }
       );
+
       if (!response.ok) {
-        throw new Error('Failed to clear cached version');
+        throw new Error('Failed to remove snapshot');
       }
-      await loadCache();
-    } catch (err) {
-      setError('Failed to remove cached version.');
+
+      await reload();
+    } catch {
+      setActionError('Failed to remove cached snapshot.');
     } finally {
       setActionKey('');
     }
   };
 
   return (
-    <section className="grid gap-6 animate-rise stagger-2">
-      <div className="rounded-3xl border border-base-300 bg-base-100/80 p-6 shadow-xl">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold">Cache status</h2>
-            <p className="mt-2 text-sm opacity-70">
-              Cached .eth and .wei sites available on your node.
-            </p>
-          </div>
-          <div className="stats stats-vertical bg-base-200/70 shadow md:stats-horizontal">
-            <div className="stat">
-              <div className="stat-title">Cached</div>
-              <div className="stat-value text-primary">{domains.length}</div>
-            </div>
-            <div className="stat">
-              <div className="stat-title">Storage</div>
-              <div className="stat-value text-secondary">{storageUsed}</div>
-            </div>
-          </div>
+    <section className="grid gap-6">
+      <div>
+        <div>
+          <h1 className="text-4xl font-semibold tracking-tight">Seeding</h1>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-base-content/65">
+            Track what is fully cached, what is still partial, and which domains automatically
+            follow the latest dapp versions.
+          </p>
         </div>
-
       </div>
 
-      <div className="rounded-3xl border border-base-300 bg-base-100/80 p-6 shadow-xl">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xl font-semibold">Cached websites</h3>
-          <button
-            className="btn btn-sm btn-outline"
-            type="button"
-            onClick={loadCache}
-          >
-            Refresh
-          </button>
+      <div className="grid grid-cols-4 gap-4">
+        <MetricTile label="Sites" value={summary.total} />
+        <MetricTile label="Following" value={summary.following} />
+        <MetricTile label="Partial" value={summary.partial} />
+        <MetricTile label="Storage" value={storageUsed} />
+      </div>
+
+      {error ? <p className="text-sm text-error">{error}</p> : null}
+      {actionError ? <p className="text-sm text-error">{actionError}</p> : null}
+
+      <div className="grid grid-cols-[360px_minmax(0,1fr)] gap-6">
+        <section className={classNames(PANEL_CLASS, 'flex min-h-[720px] flex-col p-5')}>
+          <div>
+            <label className="mb-2 block text-sm font-medium">Search domains</label>
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              className={classNames(INPUT_CLASS, 'h-12 text-sm')}
+              placeholder="Filter by domain"
+              aria-label="Search seeded domains"
+              autoComplete="off"
+              spellCheck="false"
+            />
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {filters.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setFilter(item.id)}
+                className={classNames('btn btn-sm', filter === item.id ? 'btn-neutral' : 'btn-ghost')}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-5 flex-1 overflow-y-auto pr-1">
+            {loading ? (
+              <div className="flex h-full items-center justify-center text-sm text-base-content/55">
+                <span className="loading loading-spinner loading-sm mr-2" />
+                Loading seeding data...
+              </div>
+            ) : filteredDomains.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-center text-sm leading-6 text-base-content/60">
+                No domains match the current view.
+              </div>
+            ) : (
+              <div className="grid gap-3">
+                {filteredDomains.map((domain) => {
+                  const coverage = getCoverage(domain.local_size, domain.full_size);
+                  const active = detailDomain?.domain === domain.domain;
+
+                  return (
+                    <button
+                      key={domain.domain}
+                      type="button"
+                      onClick={() => navigate(toSeedingPath(domain.domain))}
+                      className={classNames(
+                        SUBTLE_PANEL_CLASS,
+                        'w-full px-4 py-4 text-left transition',
+                        active
+                          ? 'border-primary/30 bg-primary/8'
+                          : 'hover:border-base-content/15 hover:bg-base-100/80'
+                      )}
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-medium">{domain.domain}</p>
+                          <p className="mt-1 text-xs text-base-content/55">
+                            {formatTimestamp(domain.cached_at)}
+                          </p>
+                        </div>
+
+                        <StatusPill tone={domain.auto_seeding ? 'info' : 'neutral'}>
+                          {latestTrackingStatus(domain.auto_seeding)}
+                        </StatusPill>
+                      </div>
+
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between gap-4 text-xs text-base-content/55">
+                          <span>{coverage.detail}</span>
+                          <StatusPill tone={coverage.tone}>{coverage.label}</StatusPill>
+                        </div>
+
+                        <div className="mt-2">
+                          <ProgressBar ratio={coverage.ratio} tone={coverage.tone} />
+                        </div>
+                      </div>
+
+                      <div className="mt-4 flex items-center justify-between gap-4 text-xs text-base-content/55">
+                        <span>{formatBytes(domain.local_size)} stored</span>
+                        <span>{domain.versions?.length || 0} snapshots</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <DomainDetailPanel
+          detailDomain={detailDomain}
+          routeDomain={routeDomain}
+          selectedMissing={selectedMissing}
+          actionKey={actionKey}
+          rememberRecentTarget={rememberRecentTarget}
+          onToggleLatestTracking={toggleLatestTracking}
+          onClearDomain={clearDomainCache}
+          onClearVersion={clearVersionCache}
+        />
+      </div>
+    </section>
+  );
+}
+
+function DomainDetailPanel({
+  detailDomain,
+  routeDomain,
+  selectedMissing,
+  actionKey,
+  rememberRecentTarget,
+  onToggleLatestTracking,
+  onClearDomain,
+  onClearVersion,
+}) {
+  if (selectedMissing) {
+    return (
+      <section className={classNames(PANEL_CLASS, 'flex min-h-[720px] items-center justify-center p-8')}>
+        <div className="max-w-md text-center">
+          <h2 className="text-2xl font-semibold tracking-tight">Site not found</h2>
+          <p className="mt-3 text-sm leading-6 text-base-content/60">
+            The selected domain is no longer present in local storage.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (!detailDomain) {
+    return (
+      <section className={classNames(PANEL_CLASS, 'flex min-h-[720px] items-center justify-center p-8')}>
+        <div className="max-w-md text-center">
+          <h2 className="text-2xl font-semibold tracking-tight">Nothing seeded yet</h2>
+          <p className="mt-3 text-sm leading-6 text-base-content/60">
+            Open a .eth or .wei domain from the launcher to begin filling the local cache.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  const coverage = getCoverage(detailDomain.local_size, detailDomain.full_size);
+  const isPreview = !routeDomain;
+
+  return (
+    <section className={classNames(PANEL_CLASS, 'min-h-[720px] p-6')}>
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <div className="flex items-center gap-2">
+            {isPreview ? <StatusPill tone="neutral">Preview</StatusPill> : null}
+            <StatusPill tone={coverage.tone}>{coverage.label}</StatusPill>
+            <StatusPill tone={detailDomain.auto_seeding ? 'info' : 'neutral'}>
+              {latestTrackingStatus(detailDomain.auto_seeding)}
+            </StatusPill>
+          </div>
+
+          <h2 className="mt-4 text-3xl font-semibold tracking-tight">{detailDomain.domain}</h2>
+          <p className="mt-3 text-sm leading-6 text-base-content/65">
+            {formatBytes(detailDomain.local_size)} stored locally of {formatBytes(detailDomain.full_size)} total content.
+          </p>
         </div>
 
-        <div className="mt-4 overflow-x-auto">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Domain</th>
-                <th>Cached at</th>
-                <th>
-                  <SizeHeader label="Local size" />
-                </th>
-                <th>
-                  <SizeHeader label="Full size" />
-                </th>
-                <th>Auto-seed</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan="6">
-                    <div className="flex items-center gap-2 text-sm opacity-70">
-                      <span className="loading loading-spinner loading-sm" />
-                      Loading cache...
-                    </div>
-                  </td>
-                </tr>
-              ) : error ? (
-                <tr>
-                  <td colSpan="6" className="text-sm text-error">
-                    {error}
-                  </td>
-                </tr>
-              ) : domains.length === 0 ? (
-                <tr>
-                  <td colSpan="6" className="text-sm opacity-70">
-                    No cached domains yet.
-                  </td>
-                </tr>
-              ) : (
-                domains.map((domain) => (
-                  <Fragment key={domain.domain}>
-                    <tr
-                      className="cursor-pointer transition-colors hover:bg-base-200/40"
-                      onClick={() => toggleVersions(domain.domain)}
-                    >
-                      <td>
-                        <div className="flex items-center gap-2">
-                          <span className="inline-flex w-4 justify-center text-xs opacity-60">
-                            {expandedDomain === domain.domain ? 'v' : '>'}
-                          </span>
-                          <span>{domain.domain}</span>
-                        </div>
-                      </td>
-                      <td>{domain.cached_at || '-'}</td>
-                      <td>{formatBytes(domain.local_size)}</td>
-                      <td>{formatBytes(domain.full_size)}</td>
-                      <td>
-                        <span
-                          className={`badge ${
-                            domain.auto_seeding ? 'badge-success' : 'badge-ghost'
-                          }`}
-                        >
-                          {domain.auto_seeding ? 'Enabled' : 'Off'}
-                        </span>
-                      </td>
-                      <td>
-                        <div
-                          className="flex flex-wrap gap-2"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          <a
-                            className="btn btn-xs btn-outline btn-primary"
-                            href={`https://${domain.domain}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Visit
-                          </a>
-                          <button
-                            className="btn btn-xs btn-outline btn-error"
-                            type="button"
-                            onClick={() => clearDomainCache(domain.domain)}
-                            disabled={actionKey === `clear-domain:${domain.domain}`}
-                          >
-                            Remove All
-                          </button>
-                          <button
-                            className={`btn btn-xs ${
-                              domain.auto_seeding ? 'btn-success' : 'btn-outline'
-                            }`}
-                            type="button"
-                            onClick={() => toggleAuto(domain.domain, domain.auto_seeding)}
-                            disabled={actionKey === `auto:${domain.domain}`}
-                          >
-                            Auto Seed
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+        <div className="flex items-center gap-3">
+          <a
+            href={`https://${detailDomain.domain}`}
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-primary"
+            onClick={() => rememberRecentTarget(detailDomain.domain)}
+          >
+            Open dapp
+          </a>
+        </div>
+      </div>
 
-                    {expandedDomain === domain.domain ? (
-                      <tr>
-                        <td colSpan="6" className="bg-base-200/40 p-0">
-                          <div className="px-4 py-3">
-                            <table className="table table-sm">
-                              <thead>
-                                <tr>
-                                  <th>CID</th>
-                                  <th>Cached at</th>
-                                  <th>
-                                    <SizeHeader label="Local size" />
-                                  </th>
-                                  <th>
-                                    <SizeHeader label="Full size" />
-                                  </th>
-                                  <th>Actions</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {Array.isArray(domain.versions) && domain.versions.length > 0 ? (
-                                  domain.versions.map((version) => (
-                                    <tr key={`${domain.domain}:${version.timestamp}:${version.cid}`}>
-                                      <td className="font-mono text-xs break-all">{version.cid}</td>
-                                      <td>{version.cached_at || '-'}</td>
-                                      <td>{formatBytes(version.local_size)}</td>
-                                      <td>{formatBytes(version.full_size)}</td>
-                                      <td>
-                                        <div className="flex flex-wrap gap-2">
-                                          <a
-                                            className="btn btn-xs btn-outline btn-primary"
-                                            href={version.visit_url || '#'}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                          >
-                                            Visit
-                                          </a>
-                                          <button
-                                            className="btn btn-xs btn-outline btn-error"
-                                            type="button"
-                                            onClick={() =>
-                                              clearVersionCache(domain.domain, version.timestamp)
-                                            }
-                                            disabled={
-                                              actionKey ===
-                                              `clear-version:${domain.domain}:${version.timestamp}`
-                                            }
-                                          >
-                                            Remove
-                                          </button>
-                                          <a
-                                            className="btn btn-xs btn-outline btn-primary"
-                                            href={`https://ipfs.localhost/webui/#/ipfs/${version.cid}`}
-                                            target="_blank"
-                                            rel="noreferrer"
-                                          >
-                                            Inspect Content
-                                          </a>
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  ))
-                                ) : (
-                                  <tr>
-                                    <td colSpan="5" className="text-sm opacity-70">
-                                      No cached versions.
-                                    </td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </td>
-                      </tr>
-                    ) : null}
-                  </Fragment>
-                ))
-              )}
-            </tbody>
-          </table>
+      <div className="mt-6 rounded-2xl border border-base-300/60 bg-base-100/45 p-5">
+        <div className="flex items-center justify-between gap-4 text-sm">
+          <span className="font-medium">Coverage</span>
+          <span className="text-base-content/60">{coverage.detail}</span>
+        </div>
+
+        <div className="mt-3">
+          <ProgressBar ratio={coverage.ratio} tone={coverage.tone} />
+        </div>
+      </div>
+
+      <div className="mt-6 grid grid-cols-4 gap-4">
+        <MetricTile label="Snapshots" value={detailDomain.versions?.length || 0} />
+        <MetricTile label="Last cached" value={formatTimestamp(detailDomain.cached_at)} />
+        <MetricTile label="Stored" value={formatBytes(detailDomain.local_size)} />
+        <MetricTile label="Content size" value={formatBytes(detailDomain.full_size)} />
+      </div>
+
+      <div className="mt-6 flex items-center gap-3">
+        <button
+          type="button"
+          className={`btn btn-outline ${detailDomain.auto_seeding ? 'btn-warning' : 'btn-success'}`}
+          onClick={() => onToggleLatestTracking(detailDomain.domain, detailDomain.auto_seeding)}
+          disabled={actionKey === `follow:${detailDomain.domain}`}
+        >
+          {actionKey === `follow:${detailDomain.domain}`
+            ? 'Updating...'
+            : latestTrackingAction(detailDomain.auto_seeding)}
+        </button>
+
+        <button
+          type="button"
+          className="btn btn-outline btn-error"
+          onClick={() => onClearDomain(detailDomain.domain)}
+          disabled={actionKey === `clear-domain:${detailDomain.domain}`}
+        >
+          {actionKey === `clear-domain:${detailDomain.domain}` ? 'Removing...' : 'Remove site'}
+        </button>
+      </div>
+
+      <div className="mt-8">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-semibold tracking-tight">Snapshots</h3>
+            <p className="mt-1 text-sm text-base-content/60">
+              Each cached version is available as its own stored snapshot.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 grid gap-4">
+          {Array.isArray(detailDomain.versions) && detailDomain.versions.length > 0 ? (
+            detailDomain.versions.map((version, index) => {
+              const versionCoverage = getCoverage(version.local_size, version.full_size);
+
+              return (
+                <article key={`${detailDomain.domain}:${version.timestamp}:${version.cid}`} className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+                  <div className="flex items-start justify-between gap-6">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        {index === 0 ? <StatusPill tone="info">Latest</StatusPill> : null}
+                        <StatusPill tone={versionCoverage.tone}>{versionCoverage.label}</StatusPill>
+                      </div>
+
+                      <h4 className="mt-4 text-lg font-semibold tracking-tight">
+                        {formatTimestamp(version.cached_at)}
+                      </h4>
+                      <p className="mt-2 font-mono text-xs text-base-content/60 break-all">{version.cid}</p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <a
+                        href={version.visit_url || '#'}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btn-sm btn-outline btn-accent"
+                      >
+                        Open snapshot
+                      </a>
+                      <a
+                        href={`https://ipfs.localhost/webui/#/ipfs/${version.cid}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btn-sm btn-outline btn-info"
+                      >
+                        Inspect
+                      </a>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline btn-error"
+                        onClick={() => onClearVersion(detailDomain.domain, version.timestamp)}
+                        disabled={actionKey === `clear-version:${detailDomain.domain}:${version.timestamp}`}
+                      >
+                        {actionKey === `clear-version:${detailDomain.domain}:${version.timestamp}`
+                          ? 'Removing...'
+                          : 'Remove'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 grid grid-cols-[minmax(0,1fr)_220px] gap-5">
+                    <div>
+                      <div className="flex items-center justify-between gap-4 text-sm">
+                        <span className="font-medium">Coverage</span>
+                        <span className="text-base-content/60">{versionCoverage.detail}</span>
+                      </div>
+                      <div className="mt-3">
+                        <ProgressBar ratio={versionCoverage.ratio} tone={versionCoverage.tone} />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Stored</p>
+                        <p className="mt-2 font-medium">{formatBytes(version.local_size)}</p>
+                      </div>
+                      <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Total</p>
+                        <p className="mt-2 font-medium">{formatBytes(version.full_size)}</p>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })
+          ) : (
+            <p className="text-sm leading-6 text-base-content/60">No stored snapshots yet.</p>
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-function SettingsTab() {
+function SettingsPage() {
   const [consensusRpc, setConsensusRpc] = useState('');
   const [executionRpc, setExecutionRpc] = useState('');
-  const [status, setStatus] = useState({ type: '', message: '' });
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-
-  const loadConfig = async () => {
-    try {
-      const response = await fetch('/api/config');
-      if (!response.ok) {
-        throw new Error('Failed to load config');
-      }
-      const data = await response.json();
-      setConsensusRpc(data.consensus_rpc || '');
-      setExecutionRpc(data.execution_rpc || '');
-    } catch (err) {
-      setStatus({ type: 'error', message: 'Failed to load configuration.' });
-    }
-  };
+  const [status, setStatus] = useState({ type: '', message: '' });
 
   useEffect(() => {
-    loadConfig();
+    let mounted = true;
+
+    const loadConfig = async () => {
+      try {
+        const response = await fetch('/api/config');
+        if (!response.ok) {
+          throw new Error('Failed to load config');
+        }
+
+        const data = await response.json();
+        if (!mounted) {
+          return;
+        }
+
+        setConsensusRpc(data.consensus_rpc || '');
+        setExecutionRpc(data.execution_rpc || '');
+        setStatus({ type: '', message: '' });
+      } catch {
+        if (!mounted) {
+          return;
+        }
+
+        setStatus({ type: 'error', message: 'Failed to load configuration.' });
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadConfig();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const saveConfig = async (event) => {
@@ -641,11 +1504,15 @@ function SettingsTab() {
         }),
       });
 
+      if (!response.ok) {
+        throw new Error('Failed to save settings');
+      }
+
       const result = await response.json();
       if (result.success) {
         setStatus({
           type: 'success',
-          message: 'Saved. Restart the app to apply new endpoints.',
+          message: 'Saved. Restart NeoMist to apply the new endpoints.',
         });
       } else {
         setStatus({
@@ -653,7 +1520,7 @@ function SettingsTab() {
           message: result.error || 'Failed to save settings.',
         });
       }
-    } catch (err) {
+    } catch {
       setStatus({ type: 'error', message: 'Failed to save settings.' });
     } finally {
       setSaving(false);
@@ -661,57 +1528,158 @@ function SettingsTab() {
   };
 
   return (
-    <section className="grid gap-6 animate-rise stagger-2">
-      <div className="rounded-3xl border border-base-300 bg-base-100/80 p-6 shadow-xl">
-        <h2 className="text-2xl font-semibold">RPC settings</h2>
-        <p className="mt-2 text-sm opacity-70">
-          Update the consensus and execution endpoints NeoMist uses for Helios.
+    <section className="mx-auto max-w-[920px]">
+      <div className={classNames(PANEL_CLASS, 'p-8')}>
+        <SectionEyebrow>Advanced</SectionEyebrow>
+        <h1 className="mt-4 text-4xl font-semibold tracking-tight">Settings</h1>
+        <p className="mt-3 max-w-2xl text-sm leading-6 text-base-content/65">
+          Network endpoints live here so the main UI can stay focused on opening dapps and managing seeding.
         </p>
 
-        <form className="mt-6 grid gap-4" onSubmit={saveConfig}>
-          <div>
-            <label className="label">
-              <span className="label-text">Consensus RPC</span>
-            </label>
+        <form className="mt-8 grid gap-5" onSubmit={saveConfig}>
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <label className="mb-2 block text-sm font-medium">Consensus RPC</label>
             <input
-              className="input input-bordered w-full"
+              className={INPUT_CLASS}
               value={consensusRpc}
               onChange={(event) => setConsensusRpc(event.target.value)}
               placeholder="https://"
-              type="text"
+              type="url"
+              autoComplete="off"
+              spellCheck="false"
             />
+            <p className="mt-3 text-sm text-base-content/55">Used by Helios for beacon consensus.</p>
           </div>
-          <div>
-            <label className="label">
-              <span className="label-text">Execution RPC</span>
-            </label>
+
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <label className="mb-2 block text-sm font-medium">Execution RPC</label>
             <input
-              className="input input-bordered w-full"
+              className={INPUT_CLASS}
               value={executionRpc}
               onChange={(event) => setExecutionRpc(event.target.value)}
               placeholder="https://"
-              type="text"
+              type="url"
+              autoComplete="off"
+              spellCheck="false"
             />
+            <p className="mt-3 text-sm text-base-content/55">Used for EVM execution calls and transaction data.</p>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <button className="btn btn-primary" type="submit" disabled={saving}>
-              {saving ? 'Saving...' : 'Save settings'}
+
+          <div>
+            <button className={PRIMARY_BUTTON_CLASS} type="submit" disabled={saving || loading}>
+              {saving ? 'Saving...' : 'Save network settings'}
             </button>
-            <span className="text-xs opacity-60">Changes apply after restart.</span>
           </div>
         </form>
 
         {status.message ? (
           <div
-            className={`alert mt-4 ${
-              status.type === 'success' ? 'alert-success' : 'alert-error'
-            }`}
+            className={classNames(
+              'mt-5 rounded-2xl border px-4 py-3 text-sm',
+              status.type === 'success'
+                ? 'border-success/25 bg-success/10 text-success'
+                : 'border-error/25 bg-error/10 text-error'
+            )}
           >
-            <span>{status.message}</span>
+            {status.message}
           </div>
         ) : null}
       </div>
     </section>
+  );
+}
+
+function NotFoundPage({ navigate }) {
+  return (
+    <section className="mx-auto max-w-[720px]">
+      <div className={classNames(PANEL_CLASS, 'p-10 text-center')}>
+        <SectionEyebrow>Not found</SectionEyebrow>
+        <h1 className="mt-4 text-4xl font-semibold tracking-tight">This page does not exist.</h1>
+        <p className="mt-4 text-sm leading-6 text-base-content/60">
+          Use the launcher to open a dapp or head back to the seeding console.
+        </p>
+        <div className="mt-8 flex items-center justify-center gap-3">
+          <button type="button" className={PRIMARY_BUTTON_CLASS} onClick={() => navigate('/')}>
+            Open launcher
+          </button>
+          <button
+            type="button"
+            className={SECONDARY_BUTTON_CLASS}
+            onClick={() => navigate('/seeding')}
+          >
+            Go to seeding
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MetricTile({ label, value }) {
+  return (
+    <div className={classNames(SUBTLE_PANEL_CLASS, 'p-4')}>
+      <p className="text-xs uppercase tracking-[0.22em] text-base-content/45">{label}</p>
+      <p className="mt-3 text-lg font-semibold tracking-tight">{value}</p>
+    </div>
+  );
+}
+
+function StatusPill({ tone = 'neutral', children }) {
+  const styles = {
+    neutral: 'border-base-300 bg-base-100/70 text-base-content/65',
+    success: 'border-success/25 bg-success/12 text-success',
+    warning: 'border-warning/30 bg-warning/12 text-warning',
+    info: 'border-info/30 bg-info/12 text-info',
+  };
+
+  return (
+    <span
+      className={classNames(
+        'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
+        styles[tone] || styles.neutral
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+function ProgressBar({ ratio, tone = 'neutral' }) {
+  const styles = {
+    neutral: 'bg-base-content/20',
+    success: 'bg-success',
+    warning: 'bg-warning',
+    info: 'bg-info',
+  };
+
+  return (
+    <div className="h-2 overflow-hidden rounded-full bg-base-200/80">
+      <div
+        className={classNames('h-full rounded-full transition-all', styles[tone] || styles.neutral)}
+        style={{ width: `${Math.max(0, Math.min(ratio, 1)) * 100}%` }}
+      />
+    </div>
+  );
+}
+
+function SectionEyebrow({ children }) {
+  return (
+    <span className="inline-flex rounded-full border border-base-300/70 bg-base-100/75 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.28em] text-base-content/50">
+      {children}
+    </span>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.527-.94 3.31.843 2.37 2.37a1.724 1.724 0 001.065 2.572c1.757.426 1.757 2.924 0 3.35a1.724 1.724 0 00-1.065 2.573c.94 1.527-.843 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.757-2.924 1.757-3.35 0a1.724 1.724 0 00-2.573-1.065c-1.527.94-3.31-.843-2.37-2.37a1.724 1.724 0 00-1.066-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.527.843-3.31 2.37-2.37.996.613 2.296.07 2.573-1.065z"
+      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
   );
 }
 

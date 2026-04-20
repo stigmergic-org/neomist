@@ -85,6 +85,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let title_item = MenuItem::new("NeoMist", false, None);
     let separator_top = PredefinedMenuItem::separator();
     let dashboard_item = MenuItem::new("Dashboard", true, None);
+    let separator_mid = PredefinedMenuItem::separator();
     let explore_item = MenuItem::new("Explore IPFS", true, None);
     let p2p_item = MenuItem::new(p2p_menu_label(false), false, None);
     let separator_quit = PredefinedMenuItem::separator();
@@ -94,6 +95,8 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     menu.append(&separator_top)
         .wrap_err("Failed to add tray menu")?;
     menu.append(&dashboard_item)
+        .wrap_err("Failed to add tray menu")?;
+    menu.append(&separator_mid)
         .wrap_err("Failed to add tray menu")?;
     menu.append(&explore_item)
         .wrap_err("Failed to add tray menu")?;

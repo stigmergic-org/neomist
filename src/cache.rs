@@ -165,6 +165,12 @@ pub async fn toggle_autoseed(state: &AppState, domain: &str, enable: bool) -> Re
         }
     }
 
+    if enable {
+        if let Ok(Some(latest_cid)) = crate::ens::latest_cached_cid(state, domain).await {
+            let _ = crate::ens::pin_cid(state, &latest_cid).await;
+        }
+    }
+
     Ok(())
 }
 

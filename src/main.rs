@@ -9,6 +9,7 @@ mod constants;
 mod dns;
 mod dns_server;
 mod ens;
+mod following;
 mod gas;
 mod http_server;
 mod ipfs;
@@ -308,6 +309,14 @@ fn init_services(
                 kubo_manager.stop();
                 std::process::exit(0);
             }
+        }
+    });
+
+    info!("Init: starting following background task");
+    handle.spawn({
+        let state = state.clone();
+        async move {
+            following::run_following_loop(state).await;
         }
     });
 

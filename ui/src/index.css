@@ -15,11 +15,17 @@
     --color-error: oklch(var(--er));
   }
 
+  html {
+    min-height: 100%;
+  }
+
   body {
     min-height: 100vh;
     background-color: oklch(var(--b1));
     color: oklch(var(--bc));
     position: relative;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
   }
 
   body::before {
@@ -28,23 +34,48 @@
     inset: 0;
     background:
       radial-gradient(
-        65% 50% at 12% 0%,
-        oklch(var(--p) / 0.18),
+        70% 58% at 0% 0%,
+        oklch(var(--p) / 0.12),
         transparent 60%
       ),
       radial-gradient(
-        55% 45% at 88% 10%,
-        oklch(var(--s) / 0.16),
+        54% 42% at 100% 4%,
+        oklch(var(--s) / 0.08),
         transparent 60%
       ),
       linear-gradient(180deg, oklch(var(--b1)), oklch(var(--b2)));
     z-index: -1;
   }
+
+  #root {
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background-color: oklch(var(--p) / 0.18);
+    color: oklch(var(--bc));
+  }
+
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-color: oklch(var(--bc) / 0.16);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
 }
 
 @layer utilities {
   .animate-rise {
-    animation: rise 0.6s ease-out both;
+    animation: rise 0.45s ease-out both;
   }
 
   .stagger-1 {
@@ -59,7 +90,7 @@
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;

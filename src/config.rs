@@ -14,10 +14,16 @@ const DEFAULT_EXECUTION_RPC: &str = "https://eth.drpc.org";
 pub struct AppConfig {
     pub consensus_rpc: String,
     pub execution_rpc: String,
+    #[serde(default = "default_following_interval")]
+    pub following_check_interval_mins: u64,
     #[serde(default)]
     pub dns_setup_attempted: bool,
     #[serde(default)]
     pub dns_setup_installed: bool,
+}
+
+fn default_following_interval() -> u64 {
+    30
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -73,6 +79,7 @@ fn default_config() -> AppConfig {
     AppConfig {
         consensus_rpc: DEFAULT_CONSENSUS_RPC.to_string(),
         execution_rpc: DEFAULT_EXECUTION_RPC.to_string(),
+        following_check_interval_mins: default_following_interval(),
         dns_setup_attempted: false,
         dns_setup_installed: false,
     }

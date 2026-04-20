@@ -181,7 +181,25 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
     }
 }
 
-async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result<()> {
+pub async fn pin_cid(state: &AppState, cid: &str) -> Result<()> {
+    let pin_url = format!(
+        "{}/api/v0/pin/add?arg={}",
+        state.ipfs_api_url,
+        encode_arg(&format!("/ipfs/{cid}"))
+    );
+    let response = state
+        .http_client
+        .post(pin_url)
+        .send()
+        .await
+        .wrap_err("Failed to pin CID")?;
+    if !response.status().is_success() {
+        return Err(eyre::eyre!("Pin failed with status {}", response.status()));
+    }
+    Ok(())
+}
+
+pub async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result<()> {
     let base_path = cache_base_path(site);
 
     let latest = latest_mfs_entry(state, &base_path).await?;
@@ -279,7 +297,7 @@ async fn latest_mfs_entry(state: &AppState, base_path: &str) -> Result<Option<(S
     Ok(latest)
 }
 
-async fn latest_cached_cid(state: &AppState, site: &str) -> Result<Option<String>> {
+pub async fn latest_cached_cid(state: &AppState, site: &str) -> Result<Option<String>> {
     Ok(latest_mfs_entry(state, &cache_base_path(site))
         .await?
         .map(|(_, cid)| cid))
@@ -392,7 +410,7 @@ fn decode_ipfs_contenthash(bytes: &AlloyBytes) -> Option<String> {
     Some(cid.to_string())
 }
 
-async fn resolve_contenthash(provider: &DynProvider, host: &str) -> Result<Option<String>> {
+pub async fn resolve_contenthash(provider: &DynProvider, host: &str) -> Result<Option<String>> {
     if host.ends_with(".wei") {
         return resolve_wei_ipfs(provider, host).await;
     }
