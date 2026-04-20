@@ -1,11 +1,20 @@
 use std::time::Duration;
 use tracing::{info, warn};
+use tokio::sync::mpsc::Receiver;
 
 use crate::cache;
 use crate::ens;
 use crate::state::AppState;
 
-pub async fn run_following_loop(state: AppState) {
+pub async fn run_following_loop(state: AppState, mut synced_rx: Receiver<()>) {
+    info!("Following: waiting for Helios to finish syncing...");
+    
+    if synced_rx.recv().await.is_none() {
+        warn!("Following: Helios sync channel closed prematurely");
+        return;
+    }
+    
+    info!("Following: Helios synced, starting background loop");
     loop {
         let interval_mins = {
             let config = state.config.read().await;

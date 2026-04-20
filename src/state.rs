@@ -12,7 +12,6 @@ pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub config_path: PathBuf,
     pub helios_rpc_url: String,
-    pub execution_rpc_url: String,
     pub ens_provider: Arc<DynProvider>,
     pub http_client: reqwest::Client,
     pub ipfs_gateway_port: u16,

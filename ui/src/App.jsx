@@ -590,7 +590,7 @@ function Header({ route, navigate, seedingCount }) {
 
         <div>
           <p className="text-lg font-semibold tracking-tight">NeoMist</p>
-          <p className="text-sm text-base-content/60">Ethereum without middlemen</p>
+          <p className="text-sm text-base-content/60">world computer in your pocket</p>
         </div>
       </button>
 
@@ -1608,10 +1608,12 @@ function DomainDetailPanel({
 }
 
 function SettingsPage() {
-  const [consensusRpc, setConsensusRpc] = useState('');
-  const [executionRpc, setExecutionRpc] = useState('');
+  const [consensusRpcs, setConsensusRpcs] = useState(['']);
+  const [executionRpcs, setExecutionRpcs] = useState(['']);
+  const [followingInterval, setFollowingInterval] = useState(30);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [isInitialLoad, setIsInitialLoad] = useState(true);
+  const [initialConfig, setInitialConfig] = useState(null);
   const [status, setStatus] = useState({ type: '', message: '' });
 
   useEffect(() => {
@@ -1629,8 +1631,14 @@ function SettingsPage() {
           return;
         }
 
-        setConsensusRpc(data.consensus_rpc || '');
-        setExecutionRpc(data.execution_rpc || '');
+        const cons = Array.isArray(data.consensus_rpcs) && data.consensus_rpcs.length > 0 ? data.consensus_rpcs : ['https://ethereum.operationsolarstorm.org'];
+        const execs = Array.isArray(data.execution_rpcs) && data.execution_rpcs.length > 0 ? data.execution_rpcs : ['https://eth.drpc.org'];
+        const interval = typeof data.following_check_interval_mins === 'number' ? data.following_check_interval_mins : 30;
+
+        setConsensusRpcs(cons);
+        setExecutionRpcs(execs);
+        setFollowingInterval(interval);
+        setInitialConfig(JSON.stringify({ cons, execs, interval }));
         setStatus({ type: '', message: '' });
       } catch {
         if (!mounted) {
@@ -1641,6 +1649,7 @@ function SettingsPage() {
       } finally {
         if (mounted) {
           setLoading(false);
+          setIsInitialLoad(false);
         }
       }
     };
@@ -1652,101 +1661,253 @@ function SettingsPage() {
     };
   }, []);
 
-  const saveConfig = async (event) => {
-    event.preventDefault();
-    setSaving(true);
-    setStatus({ type: '', message: '' });
+  useEffect(() => {
+    if (isInitialLoad || !initialConfig) return;
 
-    try {
-      const response = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          consensus_rpc: consensusRpc,
-          execution_rpc: executionRpc,
-        }),
-      });
+    const currentConfigStr = JSON.stringify({
+      cons: consensusRpcs,
+      execs: executionRpcs,
+      interval: followingInterval,
+    });
 
-      if (!response.ok) {
-        throw new Error('Failed to save settings');
-      }
-
-      const result = await response.json();
-      if (result.success) {
-        setStatus({
-          type: 'success',
-          message: 'Saved. Restart NeoMist to apply the new endpoints.',
-        });
-      } else {
-        setStatus({
-          type: 'error',
-          message: result.error || 'Failed to save settings.',
-        });
-      }
-    } catch {
-      setStatus({ type: 'error', message: 'Failed to save settings.' });
-    } finally {
-      setSaving(false);
+    if (currentConfigStr === initialConfig) {
+      return;
     }
+
+    const timer = setTimeout(async () => {
+      const cleanExecRpcs = executionRpcs.map(r => r.trim()).filter(Boolean);
+      const cleanConsensusRpcs = consensusRpcs.map(r => r.trim()).filter(Boolean);
+      
+      if (cleanExecRpcs.length === 0 || cleanConsensusRpcs.length === 0) {
+        setStatus({ type: 'error', message: 'At least one Consensus and Execution RPC is required.' });
+        return;
+      }
+
+      setStatus({ type: '', message: '' });
+
+      try {
+        const response = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            consensus_rpcs: cleanConsensusRpcs,
+            execution_rpcs: cleanExecRpcs,
+            following_check_interval_mins: Number(followingInterval),
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error('Failed to save settings');
+        }
+
+        const result = await response.json();
+        if (result.success) {
+          setInitialConfig(currentConfigStr);
+          setStatus({
+            type: 'success',
+            message: 'Settings saved.',
+          });
+          setTimeout(() => setStatus({ type: '', message: '' }), 3000);
+        } else {
+          setStatus({
+            type: 'error',
+            message: result.error || 'Failed to save settings.',
+          });
+        }
+      } catch {
+        setStatus({ type: 'error', message: 'Failed to save settings.' });
+      }
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [consensusRpcs, executionRpcs, followingInterval, isInitialLoad]);
+
+  const moveRpcUp = (index, list, setList) => {
+    if (index === 0) return;
+    const next = [...list];
+    [next[index - 1], next[index]] = [next[index], next[index - 1]];
+    setList(next);
+  };
+
+  const moveRpcDown = (index, list, setList) => {
+    if (index === list.length - 1) return;
+    const next = [...list];
+    [next[index + 1], next[index]] = [next[index], next[index + 1]];
+    setList(next);
+  };
+
+  const removeRpc = (index, list, setList) => {
+    const next = list.filter((_, i) => i !== index);
+    setList(next.length > 0 ? next : ['']);
+  };
+
+  const addRpc = (list, setList) => {
+    setList([...list, '']);
   };
 
   return (
     <section className="mx-auto max-w-[920px]">
-      <div className={classNames(PANEL_CLASS, 'p-8')}>
-        <SectionEyebrow>Advanced</SectionEyebrow>
-        <h1 className="mt-4 text-4xl font-semibold tracking-tight">Settings</h1>
+      <div className={classNames(PANEL_CLASS, 'p-8 relative')}>
+        <h1 className="text-4xl font-semibold tracking-tight">Settings</h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-base-content/65">
           Network endpoints live here so the main UI can stay focused on opening dapps and managing seeding.
         </p>
 
-        <form className="mt-8 grid gap-5" onSubmit={saveConfig}>
-          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <label className="mb-2 block text-sm font-medium">Consensus RPC</label>
-            <input
-              className={INPUT_CLASS}
-              value={consensusRpc}
-              onChange={(event) => setConsensusRpc(event.target.value)}
-              placeholder="https://"
-              type="url"
-              autoComplete="off"
-              spellCheck="false"
-            />
-            <p className="mt-3 text-sm text-base-content/55">Used by Helios for beacon consensus.</p>
-          </div>
-
-          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <label className="mb-2 block text-sm font-medium">Execution RPC</label>
-            <input
-              className={INPUT_CLASS}
-              value={executionRpc}
-              onChange={(event) => setExecutionRpc(event.target.value)}
-              placeholder="https://"
-              type="url"
-              autoComplete="off"
-              spellCheck="false"
-            />
-            <p className="mt-3 text-sm text-base-content/55">Used for EVM execution calls and transaction data.</p>
-          </div>
-
-          <div>
-            <button className={PRIMARY_BUTTON_CLASS} type="submit" disabled={saving || loading}>
-              {saving ? 'Saving...' : 'Save network settings'}
-            </button>
-          </div>
-        </form>
-
-        {status.message ? (
-          <div
-            className={classNames(
-              'mt-5 rounded-2xl border px-4 py-3 text-sm',
-              status.type === 'success'
-                ? 'border-success/25 bg-success/10 text-success'
-                : 'border-error/25 bg-error/10 text-error'
-            )}
-          >
+        {status.message && status.type === 'success' ? (
+          <div className="absolute right-8 top-8 rounded-full border border-success/25 bg-success/10 px-4 py-1.5 text-xs font-medium text-success animate-rise">
             {status.message}
           </div>
         ) : null}
+
+        {status.message && status.type === 'error' ? (
+          <div className="absolute right-8 top-8 rounded-full border border-error/25 bg-error/10 px-4 py-1.5 text-xs font-medium text-error animate-rise">
+            {status.message}
+          </div>
+        ) : null}
+
+        <div className="mt-8 grid gap-5">
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <label className="mb-2 block text-sm font-medium">Consensus RPCs</label>
+            <p className="mb-4 text-sm text-base-content/55">
+              Used by Helios for beacon consensus. NeoMist will automatically fall back to the next one if the top fails.
+            </p>
+            
+            <div className="grid gap-3">
+              {consensusRpcs.map((rpc, index) => (
+                <div key={`consensus-${index}`} className="flex items-center gap-2">
+                  <div className="flex flex-col gap-0.5">
+                    <button
+                      type="button"
+                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                      onClick={() => moveRpcUp(index, consensusRpcs, setConsensusRpcs)}
+                      disabled={index === 0}
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                      onClick={() => moveRpcDown(index, consensusRpcs, setConsensusRpcs)}
+                      disabled={index === consensusRpcs.length - 1}
+                    >
+                      ▼
+                    </button>
+                  </div>
+                  <input
+                    className={INPUT_CLASS}
+                    value={rpc}
+                    onChange={(event) => {
+                      const next = [...consensusRpcs];
+                      next[index] = event.target.value;
+                      setConsensusRpcs(next);
+                    }}
+                    placeholder="https://"
+                    type="url"
+                    autoComplete="off"
+                    spellCheck="false"
+                    required={index === 0}
+                  />
+                  <button
+                    type="button"
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-error/30 bg-error/10 text-error transition hover:bg-error/20"
+                    onClick={() => removeRpc(index, consensusRpcs, setConsensusRpcs)}
+                    aria-label="Remove endpoint"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+            
+            <button
+              type="button"
+              className="mt-4 text-sm font-medium text-primary transition hover:opacity-80"
+              onClick={() => addRpc(consensusRpcs, setConsensusRpcs)}
+            >
+              + Add fallback endpoint
+            </button>
+          </div>
+
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <label className="mb-2 block text-sm font-medium">Execution RPCs</label>
+            <p className="mb-4 text-sm text-base-content/55">
+              Used for EVM execution calls. NeoMist will automatically fall back to the next one if the top fails.
+            </p>
+            
+            <div className="grid gap-3">
+              {executionRpcs.map((rpc, index) => (
+                <div key={`exec-${index}`} className="flex items-center gap-2">
+                  <div className="flex flex-col gap-0.5">
+                    <button
+                      type="button"
+                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                      onClick={() => moveRpcUp(index, executionRpcs, setExecutionRpcs)}
+                      disabled={index === 0}
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                      onClick={() => moveRpcDown(index, executionRpcs, setExecutionRpcs)}
+                      disabled={index === executionRpcs.length - 1}
+                    >
+                      ▼
+                    </button>
+                  </div>
+                  <input
+                    className={INPUT_CLASS}
+                    value={rpc}
+                    onChange={(event) => {
+                      const next = [...executionRpcs];
+                      next[index] = event.target.value;
+                      setExecutionRpcs(next);
+                    }}
+                    placeholder="https://"
+                    type="url"
+                    autoComplete="off"
+                    spellCheck="false"
+                    required={index === 0}
+                  />
+                  <button
+                    type="button"
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-error/30 bg-error/10 text-error transition hover:bg-error/20"
+                    onClick={() => removeRpc(index, executionRpcs, setExecutionRpcs)}
+                    aria-label="Remove endpoint"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+            
+            <button
+              type="button"
+              className="mt-4 text-sm font-medium text-primary transition hover:opacity-80"
+              onClick={() => addRpc(executionRpcs, setExecutionRpcs)}
+            >
+              + Add fallback endpoint
+            </button>
+          </div>
+
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <label className="mb-2 block text-sm font-medium">Following Check Interval</label>
+            <p className="mt-3 text-sm text-base-content/55">
+              How often the background worker checks your followed domains for updates.
+            </p>
+            <div className="flex items-center gap-3">
+              <input
+                className={classNames(INPUT_CLASS, 'w-32')}
+                value={followingInterval}
+                onChange={(event) => setFollowingInterval(event.target.value)}
+                type="number"
+                min="0"
+                max="10080"
+              />
+              <span className="text-sm text-base-content/60">minutes (0 to disable)</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   );

@@ -8,12 +8,19 @@ use serde::{Deserialize, Serialize};
 use crate::constants::APP_DIR_NAME;
 
 const DEFAULT_CONSENSUS_RPC: &str = "https://ethereum.operationsolarstorm.org";
-const DEFAULT_EXECUTION_RPC: &str = "https://eth.drpc.org";
+fn default_consensus_rpcs() -> Vec<String> {
+    vec![DEFAULT_CONSENSUS_RPC.to_string()]
+}
+fn default_execution_rpcs() -> Vec<String> {
+    vec!["https://eth.drpc.org".to_string()]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub consensus_rpc: String,
-    pub execution_rpc: String,
+    #[serde(default = "default_consensus_rpcs")]
+    pub consensus_rpcs: Vec<String>,
+    #[serde(default = "default_execution_rpcs")]
+    pub execution_rpcs: Vec<String>,
     #[serde(default = "default_following_interval")]
     pub following_check_interval_mins: u64,
     #[serde(default)]
@@ -77,8 +84,8 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
 
 fn default_config() -> AppConfig {
     AppConfig {
-        consensus_rpc: DEFAULT_CONSENSUS_RPC.to_string(),
-        execution_rpc: DEFAULT_EXECUTION_RPC.to_string(),
+        consensus_rpcs: default_consensus_rpcs(),
+        execution_rpcs: default_execution_rpcs(),
         following_check_interval_mins: default_following_interval(),
         dns_setup_attempted: false,
         dns_setup_installed: false,

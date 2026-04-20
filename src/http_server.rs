@@ -193,9 +193,14 @@ async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn save_config_handler(
     State(state): State<AppState>,
-    Json(new_config): Json<AppConfig>,
+    Json(mut new_config): Json<AppConfig>,
 ) -> impl IntoResponse {
     let mut config_guard = state.config.write().await;
+    
+    // Preserve internal state flags from the current config
+    new_config.dns_setup_attempted = config_guard.dns_setup_attempted;
+    new_config.dns_setup_installed = config_guard.dns_setup_installed;
+    
     *config_guard = new_config.clone();
     match save_config(&state.config_path, &new_config) {
         Ok(_) => Json(SaveResponse {

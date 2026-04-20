@@ -15,6 +15,7 @@ mod http_server;
 mod ipfs;
 mod state;
 mod tray;
+mod rpc_proxy;
 
 use std::collections::VecDeque;
 use std::env;
@@ -174,8 +175,8 @@ fn init_services(
     let config = load_or_create_config(&config_path)?;
     info!("Init: checking DNS resolver setup");
     let config = maybe_install_dns(config, &config_path)?;
-    info!("Consensus RPC: {}", config.consensus_rpc);
-    info!("Execution RPC: {}", config.execution_rpc);
+    info!("Consensus RPCs: {:?}", config.consensus_rpcs);
+    info!("Execution RPCs: {:?}", config.execution_rpcs);
 
     info!("Init: resolving data directory");
     let data_dir = data_dir()?;
@@ -208,25 +209,6 @@ fn init_services(
     let handle = runtime.handle().clone();
     tray_state.set_handle(handle.clone());
 
-    info!("Init: building Helios client");
-    let helios_client: EthereumClient = runtime
-        .block_on(async {
-            EthereumClientBuilder::new()
-                .network(Network::Mainnet)
-                .consensus_rpc(config.consensus_rpc.clone())?
-                .execution_rpc(config.execution_rpc.clone())?
-                .load_external_fallback()
-                .data_dir(data_dir_for_helios)
-                .rpc_address(HELIOS_RPC_ADDR.parse()?)
-                .with_file_db()
-                .build()
-        })
-        .wrap_err("Failed to build Helios client")?;
-    info!("Init: Helios client ready");
-
-    let helios_client = Arc::new(helios_client);
-    tray_state.set_helios_client(helios_client.clone());
-
     let http_client = reqwest::Client::new();
     info!("Init: initializing IPFS");
     let kubo_manager = runtime
@@ -240,18 +222,39 @@ fn init_services(
         .connect_http(Url::parse(&format!("http://{HELIOS_RPC_ADDR}"))?)
         .erased();
 
-    let execution_rpc_url = config.execution_rpc.clone();
     let state = AppState {
-        config: Arc::new(tokio::sync::RwLock::new(config)),
-        config_path,
+        config: Arc::new(tokio::sync::RwLock::new(config.clone())),
+        config_path: config_path.clone(),
         helios_rpc_url: format!("http://{HELIOS_RPC_ADDR}"),
-        execution_rpc_url,
         ens_provider: Arc::new(ens_provider),
         http_client: http_client.clone(),
         ipfs_gateway_port,
         ipfs_api_url: "http://127.0.0.1:5001".to_string(),
         checkpoint_history,
     };
+
+    let proxy_port = runtime
+        .block_on(rpc_proxy::run_internal_proxy(state.clone()))
+        .wrap_err("Failed to start internal RPC proxy")?;
+
+    info!("Init: building Helios client");
+    let helios_client: EthereumClient = runtime
+        .block_on(async {
+            EthereumClientBuilder::new()
+                .network(Network::Mainnet)
+                .consensus_rpc(format!("http://127.0.0.1:{proxy_port}/consensus"))?
+                .execution_rpc(format!("http://127.0.0.1:{proxy_port}/execution"))?
+                .load_external_fallback()
+                .data_dir(data_dir_for_helios)
+                .rpc_address(HELIOS_RPC_ADDR.parse()?)
+                .with_file_db()
+                .build()
+        })
+        .wrap_err("Failed to build Helios client")?;
+    info!("Init: Helios client ready");
+
+    let helios_client = Arc::new(helios_client);
+    tray_state.set_helios_client(helios_client.clone());
 
     info!("Init: starting DNS server on 127.0.0.1:{}", dns::dns_port());
     handle.spawn({
@@ -280,13 +283,14 @@ fn init_services(
         let state = state.clone();
         async move {
             gas::poll_gas_price(
-                state.http_client.clone(),
-                state.execution_rpc_url.clone(),
+                state.clone(),
                 gas_tx,
             )
             .await;
         }
     });
+
+    let (sync_tx, sync_rx) = tokio::sync::mpsc::channel(1);
 
     info!("Init: starting Helios sync monitor");
     handle.spawn({
@@ -296,6 +300,7 @@ fn init_services(
                 warn!("Helios sync wait failed: {err}");
             } else {
                 info!("Helios synced");
+                let _ = sync_tx.send(()).await;
             }
         }
     });
@@ -316,7 +321,7 @@ fn init_services(
     handle.spawn({
         let state = state.clone();
         async move {
-            following::run_following_loop(state).await;
+            following::run_following_loop(state, sync_rx).await;
         }
     });
 

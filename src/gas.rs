@@ -7,35 +7,51 @@ use serde_json::json;
 use tokio::time::interval;
 use tracing::{info, warn};
 
+use crate::state::AppState;
+
 pub async fn poll_gas_price(
-    http_client: reqwest::Client,
-    execution_rpc_url: String,
+    state: AppState,
     tx: Sender<String>,
 ) {
     let mut ticker = interval(Duration::from_secs(15));
-    info!("Gas price polling using execution RPC: {execution_rpc_url}");
+    info!("Gas price polling started");
 
     loop {
         ticker.tick().await;
-        match fetch_gas_price(&http_client, &execution_rpc_url).await {
-            Ok(price) => {
-                let label = match u128::try_from(price) {
-                    Ok(wei) => {
-                        let gwei = wei as f64 / 1_000_000_000f64;
-                        if gwei < 1.0 {
-                            let mwei = wei as f64 / 1_000_000f64;
-                            format!("{:.0} Mwei", mwei)
-                        } else {
-                            format!("{:.1} Gwei", gwei)
+
+        let execution_rpcs = {
+            let config = state.config.read().await;
+            config.execution_rpcs.clone()
+        };
+
+        let mut success = false;
+        for rpc in &execution_rpcs {
+            match fetch_gas_price(&state.http_client, rpc).await {
+                Ok(price) => {
+                    let label = match u128::try_from(price) {
+                        Ok(wei) => {
+                            let gwei = wei as f64 / 1_000_000_000f64;
+                            if gwei < 1.0 {
+                                let mwei = wei as f64 / 1_000_000f64;
+                                format!("{:.0} Mwei", mwei)
+                            } else {
+                                format!("{:.1} Gwei", gwei)
+                            }
                         }
-                    }
-                    Err(_) => format!("{} Gwei", price / U256::from(1_000_000_000u64)),
-                };
-                let _ = tx.send(label);
+                        Err(_) => format!("{} Gwei", price / U256::from(1_000_000_000u64)),
+                    };
+                    let _ = tx.send(label);
+                    success = true;
+                    break;
+                }
+                Err(err) => {
+                    warn!("Failed to fetch gas price from {rpc}: {err}");
+                }
             }
-            Err(err) => {
-                warn!("Failed to fetch gas price: {err}");
-            }
+        }
+
+        if !success {
+            warn!("Failed to fetch gas price from all available RPCs");
         }
     }
 }
