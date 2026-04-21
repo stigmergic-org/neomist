@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use eyre::{Result, WrapErr};
 use helios::ethereum::EthereumClient;
 use image::GenericImageView;
+#[cfg(target_os = "macos")]
+use std::ffi::{c_char, c_void};
 use tokio::runtime::Handle;
 use tracing::warn;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -20,6 +22,44 @@ const ICON_INACTIVE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/logo-inactive.png"
 ));
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ProcessSerialNumber {
+    high_long_of_psn: u32,
+    low_long_of_psn: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn GetCurrentProcess(psn: *mut ProcessSerialNumber) -> i32;
+    fn TransformProcessType(psn: *mut ProcessSerialNumber, transform_state: u32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+const K_PROCESS_TRANSFORM_TO_UI_ELEMENT_APPLICATION: u32 = 4;
+
+#[cfg(target_os = "macos")]
+type ObjcObject = *mut c_void;
+
+#[cfg(target_os = "macos")]
+type ObjcSelector = *const c_void;
+
+#[cfg(target_os = "macos")]
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {}
+
+#[cfg(target_os = "macos")]
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_getClass(name: *const c_char) -> ObjcObject;
+    fn sel_registerName(name: *const c_char) -> ObjcSelector;
+    fn objc_msgSend();
+}
+
+#[cfg(target_os = "macos")]
+const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
 
 pub struct TrayState {
     helios_client: Mutex<Option<Arc<EthereumClient>>>,
@@ -78,6 +118,7 @@ impl TrayState {
 
 pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<()> {
     let event_loop = tao::event_loop::EventLoop::new();
+    let mut activation_policy_applied = configure_activation_policy();
 
     let icon_active = load_tray_icon(ICON_ACTIVE)?;
     let icon_inactive = load_tray_icon(ICON_INACTIVE)?;
@@ -87,7 +128,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let dashboard_item = MenuItem::new("Dashboard", true, None);
     let separator_mid = PredefinedMenuItem::separator();
     let explore_item = MenuItem::new("Explore IPFS", true, None);
-    let p2p_item = MenuItem::new(p2p_menu_label(false), false, None);
+    let p2p_item = MenuItem::new(ipfs_networking_menu_label(false), false, None);
     let separator_quit = PredefinedMenuItem::separator();
     let quit_item = MenuItem::new("Quit", true, None);
     menu.append(&title_item)
@@ -112,6 +153,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
         .with_icon_as_template(false)
         .build()
         .wrap_err("Failed to create tray icon")?;
+    activation_policy_applied = activation_policy_applied || configure_activation_policy();
 
     let menu_events = MenuEvent::receiver();
     let tray_state = tray_state.clone();
@@ -120,6 +162,10 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let mut last_networking_enabled: Option<bool> = None;
     event_loop.run(move |_event, _target, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::WaitUntil(next_tick);
+
+        if !activation_policy_applied {
+            activation_policy_applied = configure_activation_policy();
+        }
 
         let now = Instant::now();
         if now >= next_tick {
@@ -167,7 +213,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
                         match kubo_manager.set_offline(offline) {
                             Ok(changed) => {
                                 if changed {
-                                    p2p_item.set_text(p2p_menu_label(offline));
+                                    p2p_item.set_text(ipfs_networking_menu_label(offline));
                                 }
                             }
                             Err(err) => {
@@ -197,6 +243,91 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     });
 }
 
+fn configure_activation_policy() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let process_transformed = transform_process_to_ui_element();
+        let app_policy_set = set_ns_application_activation_policy();
+        process_transformed || app_policy_set
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn transform_process_to_ui_element() -> bool {
+    let mut psn = ProcessSerialNumber {
+        high_long_of_psn: 0,
+        low_long_of_psn: 0,
+    };
+
+    unsafe {
+        let status = GetCurrentProcess(&mut psn);
+        if status != 0 {
+            warn!("Failed to get current process for Dock suppression: {status}");
+            return false;
+        }
+
+        let status = TransformProcessType(&mut psn, K_PROCESS_TRANSFORM_TO_UI_ELEMENT_APPLICATION);
+        if status != 0 {
+            warn!("Failed to switch NeoMist to UIElement app: {status}");
+            return false;
+        }
+    }
+
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn set_ns_application_activation_policy() -> bool {
+    unsafe {
+        let ns_application = objc_getClass(b"NSApplication\0".as_ptr().cast());
+        if ns_application.is_null() {
+            warn!("Failed to resolve NSApplication class for Dock suppression");
+            return false;
+        }
+
+        let shared_application = msg_send_id(
+            ns_application,
+            sel_registerName(b"sharedApplication\0".as_ptr().cast()),
+        );
+        if shared_application.is_null() {
+            warn!("Failed to resolve shared NSApplication for Dock suppression");
+            return false;
+        }
+
+        let applied = msg_send_bool(
+            shared_application,
+            sel_registerName(b"setActivationPolicy:\0".as_ptr().cast()),
+            NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY,
+        );
+        if !applied {
+            warn!("Failed to set NeoMist activation policy to accessory");
+        }
+
+        applied
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_id(receiver: ObjcObject, selector: ObjcSelector) -> ObjcObject {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector) -> ObjcObject = unsafe {
+        std::mem::transmute(objc_msgSend as *const ())
+    };
+    unsafe { send(receiver, selector) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_bool(receiver: ObjcObject, selector: ObjcSelector, value: isize) -> bool {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, isize) -> i8 = unsafe {
+        std::mem::transmute(objc_msgSend as *const ())
+    };
+    unsafe { send(receiver, selector, value) != 0 }
+}
+
 fn load_tray_icon(bytes: &[u8]) -> Result<Icon> {
     let image = image::load_from_memory(bytes).wrap_err("Failed to decode tray icon")?;
     let rgba = image.to_rgba8();
@@ -214,11 +345,11 @@ fn open_url(url: &str) {
     let _ = Command::new(command).arg(url).spawn();
 }
 
-fn p2p_menu_label(offline: bool) -> &'static str {
+fn ipfs_networking_menu_label(offline: bool) -> &'static str {
     if offline {
-        "Enable P2P networking"
+        "Enable IPFS networking"
     } else {
-        "Disable P2P networking"
+        "Disable IPFS networking"
     }
 }
 
@@ -240,9 +371,10 @@ fn refresh_p2p_menu(tray_state: &TrayState, p2p_item: &MenuItem) {
         Some(kubo_manager) => {
             if kubo_manager.is_managed() {
                 p2p_item.set_enabled(true);
-                p2p_item.set_text(p2p_menu_label(kubo_manager.is_offline()));
+                p2p_item.set_text(ipfs_networking_menu_label(kubo_manager.is_offline()));
             } else {
                 p2p_item.set_enabled(false);
+                p2p_item.set_text("Using external IPFS instance");
             }
         }
         None => {
