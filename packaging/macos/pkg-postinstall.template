@@ -1,0 +1,34 @@
+#!/bin/sh
+
+set -eu
+
+APP_PATH="/Applications/__APP_NAME__.app"
+BIN_PATH="${APP_PATH}/Contents/MacOS/__EXECUTABLE_NAME__"
+APP_DIR_NAME="__APP_DIR_NAME__"
+SYSTEM_KEYCHAIN="/Library/Keychains/System.keychain"
+
+if [ ! -x "$BIN_PATH" ]; then
+    printf 'Missing NeoMist binary: %s\n' "$BIN_PATH" >&2
+    exit 1
+fi
+
+CONSOLE_USER="$(stat -f%Su /dev/console)"
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    USER_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | awk '{print $2}')"
+    if [ -n "$USER_HOME" ] && [ -d "$USER_HOME" ]; then
+        printf 'Preparing NeoMist certificate files for %s...\n' "$CONSOLE_USER"
+        /usr/bin/sudo -u "$CONSOLE_USER" env HOME="$USER_HOME" "$BIN_PATH" prepare-certs --yes
+
+        ROOT_CERT_PATH="${USER_HOME}/.local/share/${APP_DIR_NAME}/certs/root-ca-cert.pem"
+        if [ -f "$ROOT_CERT_PATH" ]; then
+            printf 'Trusting NeoMist root certificate in system keychain...\n'
+            /usr/bin/security add-trusted-cert -d -r trustRoot -k "$SYSTEM_KEYCHAIN" "$ROOT_CERT_PATH"
+        else
+            printf 'Missing root certificate after prepare-certs: %s\n' "$ROOT_CERT_PATH" >&2
+            exit 1
+        fi
+    fi
+fi
+
+printf 'Installing NeoMist DNS resolvers and CLI link...\n'
+"$BIN_PATH" install-system --yes

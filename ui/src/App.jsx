@@ -1,7 +1,7 @@
 import { generateFoamSvg } from '@simplepg/foam-identicon';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-const STARTER_DOMAINS = ['dex.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth'];
+const STARTER_DOMAINS = ['zfi.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth'];
 const CHECKPOINT_REFRESH_MS = 60000;
 const SEEDING_REFRESH_MS = 30000;
 const RECENT_STORAGE_KEY = 'neomist.recent-domains';
@@ -590,7 +590,7 @@ function Header({ route, navigate, seedingCount }) {
 
         <div>
           <p className="text-lg font-semibold tracking-tight">NeoMist</p>
-          <p className="text-sm text-base-content/60">world computer in your pocket</p>
+          <p className="text-sm text-base-content/60">a world computer in your pocket</p>
         </div>
       </button>
 
@@ -1099,8 +1099,7 @@ function CheckpointPanel({ checkpoints, error }) {
     <section className={classNames(PANEL_CLASS, 'p-6')}>
       <h2 className="text-2xl font-semibold tracking-tight">Consensus checkpoints</h2>
       <p className="mt-2 text-sm leading-6 text-base-content/65">
-        Open the latest checkpoints in a beacon explorer when you need to compare state with
-        another node.
+        Compare these checkpoints with a friend to ensure you are seeing the same version of reality.
       </p>
 
       <div className="mt-6 grid gap-3">

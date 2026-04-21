@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Conclusion</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; line-height: 1.5; }
+    h1 { font-size: 1.4rem; }
+  </style>
+</head>
+<body>
+  <h1>Installation complete</h1>
+  <p>Launch __APP_NAME__ from Applications or run <code>neomist</code> from Terminal.</p>
+  <br />
+  <p>Note: <b>You need to restart your browser</b> before visiting NeoMist-managed domains, so that certificate trust settings take effect.</p>
+</body>
+</html>

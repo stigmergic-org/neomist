@@ -1,6 +1,7 @@
 #[cfg(target_os = "windows")]
 compile_error!("NeoMist only supports macOS and Linux.");
 
+mod app_setup;
 mod cache;
 mod certs;
 mod checkpoints;
@@ -19,6 +20,7 @@ mod rpc_proxy;
 
 use std::collections::VecDeque;
 use std::env;
+use std::process::Command;
 use std::sync::{Arc, mpsc};
 
 use alloy::providers::{Provider, ProviderBuilder};
@@ -32,7 +34,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::certs::CertManager;
-use crate::config::{cache_dir, config_path, data_dir, load_or_create_config, save_config};
+use crate::config::{cache_dir, config_path, data_dir, load_or_create_config};
 use crate::state::AppState;
 
 const HELIOS_RPC_ADDR: &str = "127.0.0.1:8545";
@@ -41,13 +43,85 @@ const HELP_TEXT: &str = "NeoMist
 
 Usage:
   neomist
+  neomist prepare-certs --yes
+  neomist install-certs --yes
+  neomist install-dns --yes
+  neomist install-system --yes
+  neomist uninstall-certs --yes
+  neomist uninstall-dns --yes
   neomist uninstall --yes
   neomist --help
 
 Commands:
+  prepare-certs     Generate local certificate files without trusting root certificate
+  install-certs     Generate local certificates and trust root certificate
+  install-dns       Install NeoMist DNS resolvers (requires root)
+  install-system    Install DNS resolvers and link CLI (requires root)
+  uninstall-certs   Remove NeoMist certificates and trust settings
+  uninstall-dns     Remove NeoMist DNS resolvers (requires root)
   uninstall   Remove NeoMist DNS resolvers and certificates
 
 Options:
+  -h, --help  Print help
+";
+
+const INSTALL_CERTS_HELP_TEXT: &str = "Install NeoMist certificates
+
+Usage:
+  neomist install-certs --yes
+
+Options:
+  --yes       Confirm certificate installation
+  -h, --help  Print help
+";
+
+const PREPARE_CERTS_HELP_TEXT: &str = "Prepare NeoMist certificate files
+
+Usage:
+  neomist prepare-certs --yes
+
+Options:
+  --yes       Confirm certificate generation
+  -h, --help  Print help
+";
+
+const INSTALL_DNS_HELP_TEXT: &str = "Install NeoMist DNS resolvers
+
+Usage:
+  neomist install-dns --yes
+
+Options:
+  --yes       Confirm DNS installation
+  -h, --help  Print help
+";
+
+const INSTALL_SYSTEM_HELP_TEXT: &str = "Install NeoMist system integration
+
+Usage:
+  neomist install-system --yes
+
+Options:
+  --yes       Confirm DNS and CLI installation
+  -h, --help  Print help
+";
+
+const UNINSTALL_CERTS_HELP_TEXT: &str = "Uninstall NeoMist certificates
+
+Usage:
+  neomist uninstall-certs --yes
+
+Options:
+  --yes       Confirm certificate and trust removal (may require sudo)
+  -h, --help  Print help
+";
+
+const UNINSTALL_DNS_HELP_TEXT: &str = "Uninstall NeoMist DNS resolvers
+
+Usage:
+  neomist uninstall-dns --yes
+
+Options:
+  --yes       Confirm DNS removal
   -h, --help  Print help
 ";
 
@@ -57,14 +131,25 @@ Usage:
   neomist uninstall --yes
 
 Options:
-  --yes       Confirm uninstall
+  --yes       Confirm uninstall (may require sudo)
   -h, --help  Print help
 ";
 
 enum CliCommand {
     Run,
     ShowHelp(&'static str),
+    PrepareCerts,
+    InstallCerts,
+    InstallDns,
+    InstallSystem,
+    UninstallCerts,
+    UninstallDns,
     Uninstall,
+}
+
+enum ConfirmedCommand {
+    ShowHelp(&'static str),
+    Confirmed,
 }
 
 fn main() -> Result<()> {
@@ -75,6 +160,12 @@ fn main() -> Result<()> {
             println!("{help_text}");
             return Ok(());
         }
+        CliCommand::PrepareCerts => return prepare_certs(),
+        CliCommand::InstallCerts => return install_certs(),
+        CliCommand::InstallDns => return install_dns(),
+        CliCommand::InstallSystem => return install_system(),
+        CliCommand::UninstallCerts => return uninstall_certs_cmd(),
+        CliCommand::UninstallDns => return uninstall_dns_cmd(),
         CliCommand::Uninstall => return uninstall(),
     }
 
@@ -132,11 +223,95 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
                 ))
             }
         }
+        "prepare-certs" => match parse_confirmed_subcommand(
+            &args[1..],
+            PREPARE_CERTS_HELP_TEXT,
+            "Prepare certs requires --yes",
+            "prepare-certs",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::PrepareCerts),
+        },
+        "install-certs" => match parse_confirmed_subcommand(
+            &args[1..],
+            INSTALL_CERTS_HELP_TEXT,
+            "Install certs requires --yes",
+            "install-certs",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::InstallCerts),
+        },
+        "install-dns" => match parse_confirmed_subcommand(
+            &args[1..],
+            INSTALL_DNS_HELP_TEXT,
+            "Install DNS requires --yes",
+            "install-dns",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::InstallDns),
+        },
+        "install-system" => match parse_confirmed_subcommand(
+            &args[1..],
+            INSTALL_SYSTEM_HELP_TEXT,
+            "Install system requires --yes",
+            "install-system",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::InstallSystem),
+        },
+        "uninstall-certs" => match parse_confirmed_subcommand(
+            &args[1..],
+            UNINSTALL_CERTS_HELP_TEXT,
+            "Uninstall certs requires --yes",
+            "uninstall-certs",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::UninstallCerts),
+        },
+        "uninstall-dns" => match parse_confirmed_subcommand(
+            &args[1..],
+            UNINSTALL_DNS_HELP_TEXT,
+            "Uninstall DNS requires --yes",
+            "uninstall-dns",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::UninstallDns),
+        },
         "uninstall" => parse_uninstall_args(&args[1..]),
         unknown => Err(eyre::eyre!(
             "Unknown command or option: `{unknown}`\nRun `neomist --help` for usage."
         )),
     }
+}
+
+fn parse_confirmed_subcommand(
+    args: &[String],
+    help_text: &'static str,
+    missing_message: &'static str,
+    command_name: &'static str,
+) -> Result<ConfirmedCommand> {
+    if args.is_empty() {
+        return Err(eyre::eyre!(missing_message));
+    }
+
+    let mut confirmed = false;
+    for arg in args {
+        match arg.as_str() {
+            "--yes" => confirmed = true,
+            "-h" | "--help" | "help" => return Ok(ConfirmedCommand::ShowHelp(help_text)),
+            _ => {
+                return Err(eyre::eyre!(
+                    "Unknown option for {command_name}: `{arg}`\nRun `neomist {command_name} --help` for usage."
+                ));
+            }
+        }
+    }
+
+    if !confirmed {
+        return Err(eyre::eyre!(missing_message));
+    }
+
+    Ok(ConfirmedCommand::Confirmed)
 }
 
 fn parse_uninstall_args(args: &[String]) -> Result<CliCommand> {
@@ -172,37 +347,16 @@ fn init_services(
     info!("Init: loading configuration");
     let config_path = config_path()?;
     info!("Config path: {}", config_path.display());
-    let config = load_or_create_config(&config_path)?;
-    info!("Init: checking DNS resolver setup");
-    let config = maybe_install_dns(config, &config_path)?;
-    info!("Consensus RPCs: {:?}", config.consensus_rpcs);
-    info!("Execution RPCs: {:?}", config.execution_rpcs);
-
     info!("Init: resolving data directory");
     let data_dir = data_dir()?;
     info!("Data dir: {}", data_dir.display());
+    let config = load_or_create_config(&config_path)?;
+    let config = app_setup::prepare_runtime_setup(config, &config_path, &data_dir)?;
+    info!("Consensus RPCs: {:?}", config.consensus_rpcs);
+    info!("Execution RPCs: {:?}", config.execution_rpcs);
     let data_dir_for_helios = data_dir.clone();
 
-    info!("Init: ensuring certificates");
     let cert_manager = CertManager::new(&data_dir);
-    cert_manager
-        .ensure_certs()
-        .wrap_err("Failed to create certificates")?;
-    if !cert_manager
-        .is_root_installed()
-        .wrap_err("Failed to verify root certificate")?
-    {
-        info!("Init: installing root certificate");
-        cert_manager
-            .install_root_cert()
-            .wrap_err("Failed to install root certificate")?;
-        if !cert_manager
-            .is_root_installed()
-            .wrap_err("Failed to verify root certificate")?
-        {
-            return Err(eyre::eyre!("Root certificate not installed"));
-        }
-    }
 
     info!("Init: creating async runtime");
     let runtime = tokio::runtime::Runtime::new().wrap_err("Failed to create runtime")?;
@@ -333,40 +487,106 @@ fn init_services(
 
 fn uninstall() -> Result<()> {
     info!("Uninstalling DNS resolvers and certificates");
-    dns::uninstall_dns_setup()?;
     let data_dir = data_dir()?;
+    let running_as_root = current_user_is_root()?;
+    let needs_root = running_as_root || certs::uninstall_requires_root(&data_dir)?;
+
+    if needs_root {
+        ensure_root_command("uninstall")?;
+        dns::uninstall_dns_setup_noninteractive()?;
+    } else {
+        dns::uninstall_dns_setup()?;
+    }
+
     certs::uninstall_certs(&data_dir)?;
     info!("Uninstall complete");
     Ok(())
 }
 
-fn maybe_install_dns(
-    mut config: config::AppConfig,
-    config_path: &std::path::Path,
-) -> Result<config::AppConfig> {
-    if dns::dns_ready() {
-        if !config.dns_setup_installed {
-            config.dns_setup_installed = true;
-            save_config(config_path, &config)?;
-        }
-        return Ok(config);
+fn install_certs() -> Result<()> {
+    let data_dir = data_dir()?;
+    let cert_manager = CertManager::new(&data_dir);
+    cert_manager
+        .ensure_certs()
+        .wrap_err("Failed to create certificates")?;
+    if !cert_manager
+        .is_root_installed()
+        .wrap_err("Failed to verify root certificate")?
+    {
+        cert_manager
+            .install_root_cert()
+            .wrap_err("Failed to install root certificate")?;
+    }
+    if !cert_manager
+        .is_root_installed()
+        .wrap_err("Failed to verify root certificate")?
+    {
+        return Err(eyre::eyre!("Root certificate not installed"));
     }
 
-    info!("DNS resolver setup required; prompting for installation");
-    let installed = match dns::ensure_dns_setup() {
-        Ok(installed) => installed,
-        Err(err) => {
-            warn!("DNS resolver setup failed: {err}");
-            return Err(err);
-        }
-    };
+    println!("NeoMist certificates installed.");
+    Ok(())
+}
 
-    if !installed {
-        return Err(eyre::eyre!("DNS resolver setup did not complete"));
+fn prepare_certs() -> Result<()> {
+    let data_dir = data_dir()?;
+    let cert_manager = CertManager::new(&data_dir);
+    cert_manager
+        .ensure_certs()
+        .wrap_err("Failed to create certificates")?;
+    println!("NeoMist certificate files prepared.");
+    Ok(())
+}
+
+fn install_dns() -> Result<()> {
+    ensure_root_command("install-dns")?;
+    dns::ensure_dns_setup_noninteractive()?;
+    println!("NeoMist DNS resolvers installed.");
+    Ok(())
+}
+
+fn install_system() -> Result<()> {
+    ensure_root_command("install-system")?;
+    app_setup::install_system_for_current_exe()?;
+    println!("NeoMist system integration installed.");
+    Ok(())
+}
+
+fn uninstall_certs_cmd() -> Result<()> {
+    let data_dir = data_dir()?;
+    if certs::uninstall_requires_root(&data_dir)? {
+        ensure_root_command("uninstall-certs")?;
+    }
+    certs::uninstall_certs(&data_dir)?;
+    println!("NeoMist certificates removed.");
+    Ok(())
+}
+
+fn uninstall_dns_cmd() -> Result<()> {
+    ensure_root_command("uninstall-dns")?;
+    dns::uninstall_dns_setup_noninteractive()?;
+    println!("NeoMist DNS resolvers removed.");
+    Ok(())
+}
+
+fn ensure_root_command(command_name: &str) -> Result<()> {
+    if current_user_is_root()? {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "{command_name} requires root privileges. Run it with sudo."
+        ))
+    }
+}
+
+fn current_user_is_root() -> Result<bool> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .wrap_err("Failed to determine current user")?;
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to determine current user"));
     }
 
-    config.dns_setup_attempted = true;
-    config.dns_setup_installed = true;
-    save_config(config_path, &config)?;
-    Ok(config)
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
 }

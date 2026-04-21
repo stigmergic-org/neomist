@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Welcome</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 2rem; line-height: 1.5; }
+    h1 { font-size: 1.6rem; }
+    ul { padding-left: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>Install __APP_NAME__</h1>
+  <p>This will install __APP_NAME__.app and configure system integration needed for local ENS and IPFS browsing.</p>
+  <ul>
+    <li>DNS resolver for <code>.eth</code> and <code>.wei</code></li>
+    <li>Local HTTPS certificate trusted for browser access</li>
+    <li>A command-line interface: <code>neomist</code></li>
+  </ul>
+  <br></br>
+  <p>The installer will ask for Touch ID or password more than once because DNS changes and certificate trust use separate macOS authorization flows.</p>
+</body>
+</html>

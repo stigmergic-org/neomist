@@ -5,22 +5,27 @@ use std::process::{Command, Stdio};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use eyre::{Result, WrapErr};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose,
+    NameConstraints, PKCS_ECDSA_P256_SHA256, SanType,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use sha1::{Digest, Sha1};
 
 use crate::constants::{CA_CERT_DIR, CA_CERT_PREFIX};
 
-const ROOT_SUBJECT: &str = "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Root CA";
-const INTERMEDIATE_ETH_SUBJECT: &str =
-    "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Intermediate CA (ETH)";
-const INTERMEDIATE_WEI_SUBJECT: &str =
-    "/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN=NeoMist Intermediate CA (WEI)";
+const ROOT_COMMON_NAME: &str = "NeoMist Root CA";
+const INTERMEDIATE_ETH_COMMON_NAME: &str = "NeoMist Intermediate CA (ETH)";
+const INTERMEDIATE_WEI_COMMON_NAME: &str = "NeoMist Intermediate CA (WEI)";
 const LOCAL_UI_HOST: &str = "neomist.localhost";
 const IPFS_API_HOST: &str = "ipfs.localhost";
 const IPFS_GATEWAY_WILDCARD_HOST: &str = "*.ipfs.localhost";
 const LOCAL_UI_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST];
 const LOCAL_UI_CERT_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST, IPFS_GATEWAY_WILDCARD_HOST];
+const NEOMIST_USER_HOME_ENV: &str = "NEOMIST_USER_HOME";
+const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
 
 #[derive(Debug)]
 pub struct CertManager {
@@ -61,13 +66,11 @@ impl CertManager {
             && self.root_cert_path.exists();
 
         if have_base {
-            if is_ec_key(&self.server_key_path)? {
-                if leaf_cert_ok(&self.ethereum_cert_path, LOCAL_UI_CERT_HOSTS)? {
-                    return Ok(());
-                }
-            }
-            cleanup_cert_files(self.cert_dir.parent().unwrap_or(&self.cert_dir))?;
+            return Ok(());
         }
+
+        cleanup_cert_files(self.cert_dir.parent().unwrap_or(&self.cert_dir))?;
+        fs::create_dir_all(&self.cert_dir).wrap_err("Failed to create cert dir")?;
 
         let root_key_pem = generate_ec_key_pem()?;
         let root_key_path = self.cert_dir.join(".temp-root-key.pem");
@@ -79,7 +82,7 @@ impl CertManager {
             &self.root_cert_path,
             &self.intermediate_eth_key,
             &self.intermediate_eth_cert,
-            INTERMEDIATE_ETH_SUBJECT,
+            INTERMEDIATE_ETH_COMMON_NAME,
             ".eth",
         )?;
         create_intermediate(
@@ -87,7 +90,7 @@ impl CertManager {
             &self.root_cert_path,
             &self.intermediate_wei_key,
             &self.intermediate_wei_cert,
-            INTERMEDIATE_WEI_SUBJECT,
+            INTERMEDIATE_WEI_COMMON_NAME,
             ".wei",
         )?;
 
@@ -200,47 +203,34 @@ pub fn uninstall_certs(data_dir: &Path) -> Result<()> {
     }
 }
 
+pub fn uninstall_requires_root(data_dir: &Path) -> Result<bool> {
+    match std::env::consts::OS {
+        "macos" => macos_system_keychain_has_root_cert(data_dir),
+        _ => Ok(false),
+    }
+}
+
 pub fn root_cert_path(data_dir: &Path) -> PathBuf {
     data_dir.join("certs").join("root-ca-cert.pem")
 }
 
 fn generate_ec_key_pem() -> Result<String> {
-    let output = Command::new("openssl")
-        .args([
-            "genpkey",
-            "-algorithm",
-            "EC",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-256",
-        ])
-        .output()
-        .wrap_err("Failed to generate EC key")?;
-    if !output.status.success() {
-        return Err(eyre::eyre!("OpenSSL keygen failed"));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
+        .map(|key_pair| key_pair.serialize_pem())
+        .wrap_err("Failed to generate EC key")
 }
 
 fn create_root_cert(root_key: &Path, root_cert: &Path) -> Result<()> {
-    let ext_path = root_cert.with_extension("cnf");
-    let ext = "[req]\ndistinguished_name = req_distinguished_name\nx509_extensions = v3_ca\n\n[req_distinguished_name]\n\n[v3_ca]\nbasicConstraints = critical,CA:true\nkeyUsage = critical,keyCertSign,cRLSign\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always,issuer:always\n";
-    fs::write(&ext_path, ext).wrap_err("Failed to write root ext")?;
+    let mut params = CertificateParams::new(Vec::<String>::new());
+    params.alg = &PKCS_ECDSA_P256_SHA256;
+    params.key_pair = Some(load_key_pair(root_key)?);
+    params.distinguished_name = neomist_distinguished_name(ROOT_COMMON_NAME);
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
-    let status = Command::new("openssl")
-        .args(["req", "-new", "-x509", "-days", "3650", "-key"])
-        .arg(root_key)
-        .args(["-out"])
-        .arg(root_cert)
-        .args(["-subj", ROOT_SUBJECT, "-config"])
-        .arg(&ext_path)
-        .args(["-extensions", "v3_ca"])
-        .status()
-        .wrap_err("Failed to create root cert")?;
-
-    fs::remove_file(&ext_path).ok();
-    if !status.success() {
-        return Err(eyre::eyre!("OpenSSL root cert failed"));
-    }
+    let cert = Certificate::from_params(params).wrap_err("Failed to build root cert")?;
+    let pem = cert.serialize_pem().wrap_err("Failed to serialize root cert")?;
+    fs::write(root_cert, pem).wrap_err("Failed to write root cert")?;
     Ok(())
 }
 
@@ -249,64 +239,33 @@ fn create_intermediate(
     root_cert: &Path,
     key_out: &Path,
     cert_out: &Path,
-    subject: &str,
+    common_name: &str,
     permitted_dns: &str,
 ) -> Result<()> {
-    let key_status = Command::new("openssl")
-        .args([
-            "genpkey",
-            "-algorithm",
-            "EC",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-256",
-            "-out",
-        ])
-        .arg(key_out)
-        .status()
+    let signer = load_signing_cert(root_cert, root_key)?;
+    let key_pair = KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
         .wrap_err("Failed to generate intermediate key")?;
-    if !key_status.success() {
-        return Err(eyre::eyre!("OpenSSL intermediate key failed"));
-    }
+    let key_pem = key_pair.serialize_pem();
 
-    let csr_path = cert_out.with_extension("csr");
-    let csr_status = Command::new("openssl")
-        .args(["req", "-new", "-key"])
-        .arg(key_out)
-        .args(["-out"])
-        .arg(&csr_path)
-        .args(["-subj", subject])
-        .status()
-        .wrap_err("Failed to create intermediate CSR")?;
-    if !csr_status.success() {
-        return Err(eyre::eyre!("OpenSSL intermediate CSR failed"));
-    }
+    let mut params = CertificateParams::new(Vec::<String>::new());
+    params.alg = &PKCS_ECDSA_P256_SHA256;
+    params.key_pair = Some(key_pair);
+    params.distinguished_name = neomist_distinguished_name(common_name);
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.name_constraints = Some(NameConstraints {
+        permitted_subtrees: vec![GeneralSubtree::DnsName(permitted_dns.to_string())],
+        excluded_subtrees: Vec::new(),
+    });
+    params.use_authority_key_identifier_extension = true;
 
-    let ext_path = cert_out.with_extension("cnf");
-    let ext = format!(
-        "[v3_intermediate_ca]\nbasicConstraints = critical,CA:true,pathlen:0\nkeyUsage = critical,keyCertSign,cRLSign\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always,issuer:always\nnameConstraints = critical,permitted;DNS:{permitted_dns}\n"
-    );
-    fs::write(&ext_path, ext).wrap_err("Failed to write intermediate ext")?;
+    let cert = Certificate::from_params(params).wrap_err("Failed to build intermediate cert")?;
+    let cert_pem = cert
+        .serialize_pem_with_signer(&signer)
+        .wrap_err("Failed to sign intermediate cert")?;
 
-    let sign_status = Command::new("openssl")
-        .args(["x509", "-req", "-in"])
-        .arg(&csr_path)
-        .args(["-CA"])
-        .arg(root_cert)
-        .args(["-CAkey"])
-        .arg(root_key)
-        .args(["-CAcreateserial", "-out"])
-        .arg(cert_out)
-        .args(["-days", "3650", "-sha256", "-extfile"])
-        .arg(&ext_path)
-        .args(["-extensions", "v3_intermediate_ca"])
-        .status()
-        .wrap_err("Failed to sign intermediate")?;
-
-    fs::remove_file(&csr_path).ok();
-    fs::remove_file(&ext_path).ok();
-    if !sign_status.success() {
-        return Err(eyre::eyre!("OpenSSL intermediate sign failed"));
-    }
+    fs::write(key_out, key_pem).wrap_err("Failed to write intermediate key")?;
+    fs::write(cert_out, cert_pem).wrap_err("Failed to write intermediate cert")?;
     Ok(())
 }
 
@@ -314,21 +273,9 @@ fn ensure_server_key(path: &Path) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
-    let status = Command::new("openssl")
-        .args([
-            "genpkey",
-            "-algorithm",
-            "EC",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-256",
-            "-out",
-        ])
-        .arg(path)
-        .status()
+    let key_pair = KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
         .wrap_err("Failed to generate server key")?;
-    if !status.success() {
-        return Err(eyre::eyre!("OpenSSL server key failed"));
-    }
+    fs::write(path, key_pair.serialize_pem()).wrap_err("Failed to write server key")?;
     Ok(())
 }
 
@@ -340,91 +287,28 @@ fn create_leaf_cert(
     subject_cn: &str,
     sans: Vec<&str>,
 ) -> Result<()> {
-    let csr_path = cert_out.with_extension("csr");
-    let subject = format!("/C=US/ST=Local/L=Local/O=NeoMist/OU=Development/CN={subject_cn}");
-    let csr_status = Command::new("openssl")
-        .args(["req", "-new", "-key"])
-        .arg(key_path)
-        .args(["-out"])
-        .arg(&csr_path)
-        .args(["-subj", &subject])
-        .status()
-        .wrap_err("Failed to create leaf CSR")?;
-    if !csr_status.success() {
-        return Err(eyre::eyre!("OpenSSL leaf CSR failed"));
-    }
+    let signer = load_signing_cert(signer_cert, signer_key)?;
+    let key_pair = load_key_pair(key_path)?;
 
-    let ext_path = cert_out.with_extension("cnf");
-    let mut ext = String::from(
-        "[v3_req]\nbasicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = serverAuth\nsubjectAltName = @alt_names\n\n[alt_names]\n",
-    );
-    for (idx, san) in sans.iter().enumerate() {
-        ext.push_str(&format!("DNS.{} = {}\n", idx + 1, san));
-    }
-    fs::write(&ext_path, ext).wrap_err("Failed to write leaf ext")?;
+    let mut params = CertificateParams::new(Vec::<String>::new());
+    params.alg = &PKCS_ECDSA_P256_SHA256;
+    params.key_pair = Some(key_pair);
+    params.distinguished_name = neomist_distinguished_name(subject_cn);
+    params.subject_alt_names = sans
+        .into_iter()
+        .map(|san| SanType::DnsName(san.to_string()))
+        .collect();
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.use_authority_key_identifier_extension = true;
 
-    let sign_status = Command::new("openssl")
-        .args(["x509", "-req", "-in"])
-        .arg(&csr_path)
-        .args(["-CA"])
-        .arg(signer_cert)
-        .args(["-CAkey"])
-        .arg(signer_key)
-        .args(["-CAcreateserial", "-out"])
-        .arg(cert_out)
-        .args(["-days", "365", "-sha256", "-extfile"])
-        .arg(&ext_path)
-        .args(["-extensions", "v3_req"])
-        .status()
-        .wrap_err("Failed to sign leaf")?;
-
-    fs::remove_file(&csr_path).ok();
-    fs::remove_file(&ext_path).ok();
-    if !sign_status.success() {
-        return Err(eyre::eyre!("OpenSSL leaf sign failed"));
-    }
+    let cert = Certificate::from_params(params).wrap_err("Failed to build leaf cert")?;
+    let cert_pem = cert
+        .serialize_pem_with_signer(&signer)
+        .wrap_err("Failed to sign leaf cert")?;
+    fs::write(cert_out, cert_pem).wrap_err("Failed to write leaf cert")?;
     Ok(())
-}
-
-fn is_ec_key(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let output = Command::new("openssl")
-        .args(["pkey", "-in"])
-        .arg(path)
-        .args(["-text", "-noout"])
-        .output()
-        .wrap_err("Failed to inspect key")?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.contains("EC Public-Key") || stdout.contains("ASN1 OID: prime256v1"))
-}
-
-fn leaf_cert_ok(path: &Path, expected_hosts: &[&str]) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let output = Command::new("openssl")
-        .args(["x509", "-in"])
-        .arg(path)
-        .args(["-text", "-noout"])
-        .output()
-        .wrap_err("Failed to inspect cert")?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let hosts_match = expected_hosts.iter().all(|expected_host| {
-        stdout.contains(&format!("DNS:{expected_host}"))
-            || stdout.contains(&format!("DNS: {expected_host}"))
-    });
-    Ok(hosts_match
-        && !stdout.contains("Key Encipherment")
-        && stdout.contains("Extended Key Usage")
-        && stdout.contains("TLS Web Server Authentication"))
 }
 
 fn is_ipfs_gateway_host(host: &str) -> bool {
@@ -488,9 +372,8 @@ fn load_leaf_chain_with_chain(
 }
 
 fn install_root_macos(cert_path: &Path) -> Result<()> {
-    let home = std::env::var("HOME").wrap_err("HOME not set")?;
-    let keychain = format!("{home}/Library/Keychains/login.keychain-db");
-    let status = Command::new("/usr/bin/security")
+    let keychain = macos_login_keychain_path()?;
+    let status = Command::new(security_bin())
         .arg("add-trusted-cert")
         .arg("-r")
         .arg("trustRoot")
@@ -531,17 +414,11 @@ fn is_root_installed_macos(cert_path: &Path) -> Result<bool> {
         return Ok(false);
     }
     let fingerprint = cert_fingerprint_sha1(cert_path)?;
-    let home = std::env::var("HOME").wrap_err("HOME not set")?;
-    let keychain = format!("{home}/Library/Keychains/login.keychain-db");
-    let output = Command::new("security")
-        .arg("find-certificate")
-        .arg("-a")
-        .arg("-Z")
-        .arg(&keychain)
-        .output()
-        .wrap_err("Failed to check keychain")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.contains(&fingerprint))
+    let keychain = macos_login_keychain_path()?;
+    Ok(
+        keychain_contains_fingerprint(&keychain, &fingerprint)?
+            || keychain_contains_fingerprint(SYSTEM_KEYCHAIN_PATH, &fingerprint)?
+    )
 }
 
 fn is_root_installed_linux(cert_path: &Path) -> Result<bool> {
@@ -555,32 +432,114 @@ fn is_root_installed_linux(cert_path: &Path) -> Result<bool> {
 
 fn uninstall_macos(data_dir: &Path) -> Result<()> {
     let cert_path = root_cert_path(data_dir);
-    if !cert_path.exists() {
-        return Ok(());
-    }
+    let keychain = macos_login_keychain_path()?;
 
-    let fingerprint = cert_fingerprint_sha1(&cert_path)?;
-    let home = std::env::var("HOME").wrap_err("HOME not set")?;
-    let keychain = format!("{home}/Library/Keychains/login.keychain-db");
+    if cert_path.exists() {
+        let fingerprint = cert_fingerprint_sha1(&cert_path)?;
 
-    let status = Command::new("/usr/bin/security")
-        .arg("delete-certificate")
-        .arg("-Z")
-        .arg(&fingerprint)
-        .arg(&keychain)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .wrap_err("Failed to remove certificate from login keychain")?;
+        if keychain_contains_fingerprint(&keychain, &fingerprint)? {
+            delete_certificate_from_keychain(&keychain, &fingerprint)
+                .wrap_err("Failed to remove certificate from login keychain")?;
+        }
 
-    if !status.success() {
-        return Err(eyre::eyre!(
-            "Failed to remove certificate from login keychain"
-        ));
+        if keychain_contains_fingerprint(SYSTEM_KEYCHAIN_PATH, &fingerprint)? {
+            delete_certificate_from_system_keychain(&fingerprint)
+                .wrap_err("Failed to remove certificate from system keychain")?;
+        }
+    } else {
+        if keychain_contains_common_name(&keychain, ROOT_COMMON_NAME)? {
+            delete_certificate_by_name_from_keychain(&keychain, ROOT_COMMON_NAME)
+                .wrap_err("Failed to remove certificate from login keychain")?;
+        }
+
+        if keychain_contains_common_name(SYSTEM_KEYCHAIN_PATH, ROOT_COMMON_NAME)? {
+            delete_certificate_by_name_from_system_keychain(ROOT_COMMON_NAME)
+                .wrap_err("Failed to remove certificate from system keychain")?;
+        }
     }
 
     cleanup_cert_files(data_dir)?;
     Ok(())
+}
+
+fn macos_system_keychain_has_root_cert(data_dir: &Path) -> Result<bool> {
+    let cert_path = root_cert_path(data_dir);
+    if cert_path.exists() {
+        let fingerprint = cert_fingerprint_sha1(&cert_path)?;
+        keychain_contains_fingerprint(SYSTEM_KEYCHAIN_PATH, &fingerprint)
+    } else {
+        keychain_contains_common_name(SYSTEM_KEYCHAIN_PATH, ROOT_COMMON_NAME)
+    }
+}
+
+fn delete_certificate_from_keychain(keychain: &str, fingerprint: &str) -> Result<()> {
+    let status = Command::new(security_bin())
+        .arg("delete-certificate")
+        .arg("-t")
+        .arg("-Z")
+        .arg(fingerprint)
+        .arg(keychain)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .wrap_err("Failed to run certificate delete command")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("Certificate delete command failed"))
+    }
+}
+
+fn delete_certificate_by_name_from_keychain(keychain: &str, common_name: &str) -> Result<()> {
+    let status = Command::new(security_bin())
+        .arg("delete-certificate")
+        .arg("-t")
+        .arg("-c")
+        .arg(common_name)
+        .arg(keychain)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .wrap_err("Failed to run certificate delete command")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("Certificate delete command failed"))
+    }
+}
+
+fn delete_certificate_from_system_keychain(fingerprint: &str) -> Result<()> {
+    delete_certificate_from_keychain(SYSTEM_KEYCHAIN_PATH, fingerprint)
+}
+
+fn delete_certificate_by_name_from_system_keychain(common_name: &str) -> Result<()> {
+    delete_certificate_by_name_from_keychain(SYSTEM_KEYCHAIN_PATH, common_name)
+}
+
+fn keychain_contains_fingerprint(keychain: &str, fingerprint: &str) -> Result<bool> {
+    let output = Command::new(security_bin())
+        .arg("find-certificate")
+        .arg("-a")
+        .arg("-Z")
+        .arg(keychain)
+        .output()
+        .wrap_err("Failed to check keychain")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.contains(fingerprint))
+}
+
+fn keychain_contains_common_name(keychain: &str, common_name: &str) -> Result<bool> {
+    let output = Command::new(security_bin())
+        .arg("find-certificate")
+        .arg("-a")
+        .arg("-c")
+        .arg(common_name)
+        .arg(keychain)
+        .output()
+        .wrap_err("Failed to check keychain")?;
+    Ok(output.status.success() && !output.stdout.is_empty())
 }
 
 fn uninstall_linux(data_dir: &Path) -> Result<()> {
@@ -622,4 +581,75 @@ fn cert_fingerprint_sha1(cert_path: &Path) -> Result<String> {
     let mut hasher = Sha1::new();
     hasher.update(der);
     Ok(hex::encode(hasher.finalize()).to_uppercase())
+}
+
+fn security_bin() -> &'static str {
+    "/usr/bin/security"
+}
+
+fn macos_login_keychain_path() -> Result<String> {
+    if let Ok(home) = std::env::var(NEOMIST_USER_HOME_ENV) {
+        if !home.is_empty() {
+            return Ok(format!("{home}/Library/Keychains/login.keychain-db"));
+        }
+    }
+
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() && user != "root" {
+            if let Ok(home) = home_dir_for_user(&user) {
+                return Ok(format!("{home}/Library/Keychains/login.keychain-db"));
+            }
+        }
+    }
+
+    let home = std::env::var("HOME").wrap_err("HOME not set")?;
+    Ok(format!("{home}/Library/Keychains/login.keychain-db"))
+}
+
+fn home_dir_for_user(user: &str) -> Result<String> {
+    let output = Command::new("dscl")
+        .arg(".")
+        .arg("-read")
+        .arg(format!("/Users/{user}"))
+        .arg("NFSHomeDirectory")
+        .output()
+        .wrap_err("Failed to resolve user home directory")?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to resolve user home directory"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let home = stdout
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| eyre::eyre!("Failed to parse user home directory"))?;
+    Ok(home.to_string())
+}
+
+fn neomist_distinguished_name(common_name: &str) -> DistinguishedName {
+    let mut distinguished_name = DistinguishedName::new();
+    distinguished_name.push(DnType::CountryName, "US");
+    distinguished_name.push(DnType::StateOrProvinceName, "Local");
+    distinguished_name.push(DnType::LocalityName, "Local");
+    distinguished_name.push(DnType::OrganizationName, "NeoMist");
+    distinguished_name.push(DnType::OrganizationalUnitName, "Development");
+    distinguished_name.push(DnType::CommonName, common_name);
+    distinguished_name
+}
+
+fn load_key_pair(path: &Path) -> Result<KeyPair> {
+    let pem = fs::read_to_string(path)
+        .wrap_err_with(|| format!("Failed to read key {}", path.display()))?;
+    KeyPair::from_pem(&pem).wrap_err_with(|| format!("Failed to parse key {}", path.display()))
+}
+
+fn load_signing_cert(cert_path: &Path, key_path: &Path) -> Result<Certificate> {
+    let cert_pem = fs::read_to_string(cert_path)
+        .wrap_err_with(|| format!("Failed to read cert {}", cert_path.display()))?;
+    let key_pair = load_key_pair(key_path)?;
+    let params = CertificateParams::from_ca_cert_pem(&cert_pem, key_pair)
+        .wrap_err_with(|| format!("Failed to parse signer cert {}", cert_path.display()))?;
+    Certificate::from_params(params)
+        .wrap_err_with(|| format!("Failed to load signer cert {}", cert_path.display()))
 }

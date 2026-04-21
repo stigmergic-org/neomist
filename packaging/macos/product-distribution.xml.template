@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+    <title>__APP_NAME__</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="__PKG_IDENTIFIER__"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="__PKG_IDENTIFIER__" visible="false">
+        <pkg-ref id="__PKG_IDENTIFIER__"/>
+    </choice>
+    <pkg-ref id="__PKG_IDENTIFIER__" version="__APP_VERSION__">__COMPONENT_PKG_FILENAME__</pkg-ref>
+</installer-gui-script>

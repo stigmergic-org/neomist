@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use directories::BaseDirs;
 use eyre::{ContextCompat, Result, WrapErr};
@@ -48,8 +49,7 @@ pub fn config_path() -> Result<PathBuf> {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
-    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    let home = base.home_dir();
+    let home = data_home_dir()?;
     let dir = home.join(".local").join("share").join(APP_DIR_NAME);
     fs::create_dir_all(&dir).wrap_err("Failed to create data directory")?;
     Ok(dir)
@@ -97,4 +97,57 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
         fs::create_dir_all(parent).wrap_err("Failed to create config directory")?;
     }
     Ok(())
+}
+
+fn data_home_dir() -> Result<PathBuf> {
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        if !user.is_empty() && user != "root" {
+            if let Ok(home) = home_dir_for_user(&user) {
+                return Ok(home);
+            }
+        }
+    }
+
+    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
+    Ok(base.home_dir().to_path_buf())
+}
+
+fn home_dir_for_user(user: &str) -> Result<PathBuf> {
+    let output = match std::env::consts::OS {
+        "macos" => Command::new("dscl")
+            .arg(".")
+            .arg("-read")
+            .arg(format!("/Users/{user}"))
+            .arg("NFSHomeDirectory")
+            .output(),
+        "linux" => Command::new("getent").arg("passwd").arg(user).output(),
+        other => {
+            return Err(eyre::eyre!(
+                "Unsupported OS for sudo user home resolution: {other}"
+            ));
+        }
+    }
+    .wrap_err("Failed to resolve sudo user home directory")?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to resolve sudo user home directory"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let home = if std::env::consts::OS == "macos" {
+        stdout
+            .split_whitespace()
+            .nth(1)
+            .ok_or_else(|| eyre::eyre!("Failed to parse sudo user home directory"))?
+            .to_string()
+    } else {
+        stdout
+            .trim()
+            .split(':')
+            .nth(5)
+            .ok_or_else(|| eyre::eyre!("Failed to parse sudo user home directory"))?
+            .to_string()
+    };
+
+    Ok(PathBuf::from(home))
 }
