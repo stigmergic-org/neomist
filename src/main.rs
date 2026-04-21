@@ -43,92 +43,53 @@ const HELP_TEXT: &str = "NeoMist
 
 Usage:
   neomist
-  neomist prepare-certs --yes
-  neomist install-certs --yes
-  neomist install-dns --yes
-  neomist install-system --yes
-  neomist uninstall-certs --yes
-  neomist uninstall-dns --yes
-  neomist uninstall --yes
+  neomist system <install|uninstall> --yes
   neomist --help
 
 Commands:
-  prepare-certs     Generate local certificate files without trusting root certificate
-  install-certs     Generate local certificates and trust root certificate
-  install-dns       Install NeoMist DNS resolvers (requires root)
-  install-system    Install DNS resolvers and link CLI (requires root)
-  uninstall-certs   Remove NeoMist certificates and trust settings
-  uninstall-dns     Remove NeoMist DNS resolvers (requires root)
-  uninstall   Remove NeoMist DNS resolvers and certificates
+  system            Manage NeoMist DNS, certificates, and CLI integration
 
 Options:
   -h, --help  Print help
 ";
 
-const INSTALL_CERTS_HELP_TEXT: &str = "Install NeoMist certificates
+const SYSTEM_HELP_TEXT: &str = "Manage NeoMist system integration
 
 Usage:
-  neomist install-certs --yes
+  neomist system install --yes
+  neomist system uninstall --yes
+  neomist system --help
+
+Subcommands:
+  install     Install NeoMist certificate trust, DNS resolvers, and CLI link.
+  uninstall   Remove DNS resolvers, NeoMist certificate trust, and generated certificate files.
+";
+
+const SYSTEM_INSTALL_HELP_TEXT: &str = "Install NeoMist system integration
+
+Usage:
+  neomist system install --yes
+
+Does:
+  prepares NeoMist certificate files if missing
+  installs NeoMist certificate trust when command can do so
+  installs DNS resolvers for .eth and .wei
+  links /usr/local/bin/neomist
 
 Options:
-  --yes       Confirm certificate installation
+  --yes       Confirm certificate, DNS, and CLI installation
   -h, --help  Print help
 ";
 
-const PREPARE_CERTS_HELP_TEXT: &str = "Prepare NeoMist certificate files
+const SYSTEM_UNINSTALL_HELP_TEXT: &str = "Uninstall NeoMist system integration
 
 Usage:
-  neomist prepare-certs --yes
+  neomist system uninstall --yes
 
-Options:
-  --yes       Confirm certificate generation
-  -h, --help  Print help
-";
-
-const INSTALL_DNS_HELP_TEXT: &str = "Install NeoMist DNS resolvers
-
-Usage:
-  neomist install-dns --yes
-
-Options:
-  --yes       Confirm DNS installation
-  -h, --help  Print help
-";
-
-const INSTALL_SYSTEM_HELP_TEXT: &str = "Install NeoMist system integration
-
-Usage:
-  neomist install-system --yes
-
-Options:
-  --yes       Confirm DNS and CLI installation
-  -h, --help  Print help
-";
-
-const UNINSTALL_CERTS_HELP_TEXT: &str = "Uninstall NeoMist certificates
-
-Usage:
-  neomist uninstall-certs --yes
-
-Options:
-  --yes       Confirm certificate and trust removal (may require sudo)
-  -h, --help  Print help
-";
-
-const UNINSTALL_DNS_HELP_TEXT: &str = "Uninstall NeoMist DNS resolvers
-
-Usage:
-  neomist uninstall-dns --yes
-
-Options:
-  --yes       Confirm DNS removal
-  -h, --help  Print help
-";
-
-const UNINSTALL_HELP_TEXT: &str = "Uninstall NeoMist
-
-Usage:
-  neomist uninstall --yes
+Does:
+  removes DNS resolvers
+  removes NeoMist certificate trust
+  deletes generated certificate files
 
 Options:
   --yes       Confirm uninstall (may require sudo)
@@ -138,13 +99,8 @@ Options:
 enum CliCommand {
     Run,
     ShowHelp(&'static str),
-    PrepareCerts,
-    InstallCerts,
-    InstallDns,
-    InstallSystem,
-    UninstallCerts,
-    UninstallDns,
-    Uninstall,
+    SystemInstall,
+    SystemUninstall,
 }
 
 enum ConfirmedCommand {
@@ -160,13 +116,8 @@ fn main() -> Result<()> {
             println!("{help_text}");
             return Ok(());
         }
-        CliCommand::PrepareCerts => return prepare_certs(),
-        CliCommand::InstallCerts => return install_certs(),
-        CliCommand::InstallDns => return install_dns(),
-        CliCommand::InstallSystem => return install_system(),
-        CliCommand::UninstallCerts => return uninstall_certs_cmd(),
-        CliCommand::UninstallDns => return uninstall_dns_cmd(),
-        CliCommand::Uninstall => return uninstall(),
+        CliCommand::SystemInstall => return install_system(),
+        CliCommand::SystemUninstall => return uninstall(),
     }
 
     if rustls::crypto::aws_lc_rs::default_provider()
@@ -223,63 +174,42 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
                 ))
             }
         }
-        "prepare-certs" => match parse_confirmed_subcommand(
-            &args[1..],
-            PREPARE_CERTS_HELP_TEXT,
-            "Prepare certs requires --yes",
-            "prepare-certs",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::PrepareCerts),
-        },
-        "install-certs" => match parse_confirmed_subcommand(
-            &args[1..],
-            INSTALL_CERTS_HELP_TEXT,
-            "Install certs requires --yes",
-            "install-certs",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::InstallCerts),
-        },
-        "install-dns" => match parse_confirmed_subcommand(
-            &args[1..],
-            INSTALL_DNS_HELP_TEXT,
-            "Install DNS requires --yes",
-            "install-dns",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::InstallDns),
-        },
-        "install-system" => match parse_confirmed_subcommand(
-            &args[1..],
-            INSTALL_SYSTEM_HELP_TEXT,
-            "Install system requires --yes",
-            "install-system",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::InstallSystem),
-        },
-        "uninstall-certs" => match parse_confirmed_subcommand(
-            &args[1..],
-            UNINSTALL_CERTS_HELP_TEXT,
-            "Uninstall certs requires --yes",
-            "uninstall-certs",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::UninstallCerts),
-        },
-        "uninstall-dns" => match parse_confirmed_subcommand(
-            &args[1..],
-            UNINSTALL_DNS_HELP_TEXT,
-            "Uninstall DNS requires --yes",
-            "uninstall-dns",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::UninstallDns),
-        },
-        "uninstall" => parse_uninstall_args(&args[1..]),
+        "system" => parse_system_args(&args[1..]),
         unknown => Err(eyre::eyre!(
             "Unknown command or option: `{unknown}`\nRun `neomist --help` for usage."
+        )),
+    }
+}
+
+fn parse_system_args(args: &[String]) -> Result<CliCommand> {
+    if args.is_empty() {
+        return Err(eyre::eyre!(
+            "System command requires subcommand.\nRun `neomist system --help` for usage."
+        ));
+    }
+
+    match args[0].as_str() {
+        "-h" | "--help" | "help" => Ok(CliCommand::ShowHelp(SYSTEM_HELP_TEXT)),
+        "install" => match parse_confirmed_subcommand(
+            &args[1..],
+            SYSTEM_INSTALL_HELP_TEXT,
+            "System install requires --yes",
+            "system install",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::SystemInstall),
+        },
+        "uninstall" => match parse_confirmed_subcommand(
+            &args[1..],
+            SYSTEM_UNINSTALL_HELP_TEXT,
+            "System uninstall requires --yes",
+            "system uninstall",
+        )? {
+            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
+            ConfirmedCommand::Confirmed => Ok(CliCommand::SystemUninstall),
+        },
+        unknown => Err(eyre::eyre!(
+            "Unknown system subcommand: `{unknown}`\nRun `neomist system --help` for usage."
         )),
     }
 }
@@ -312,31 +242,6 @@ fn parse_confirmed_subcommand(
     }
 
     Ok(ConfirmedCommand::Confirmed)
-}
-
-fn parse_uninstall_args(args: &[String]) -> Result<CliCommand> {
-    if args.is_empty() {
-        return Err(eyre::eyre!("Uninstall requires --yes"));
-    }
-
-    let mut confirmed = false;
-    for arg in args {
-        match arg.as_str() {
-            "--yes" => confirmed = true,
-            "-h" | "--help" | "help" => return Ok(CliCommand::ShowHelp(UNINSTALL_HELP_TEXT)),
-            _ => {
-                return Err(eyre::eyre!(
-                    "Unknown option for uninstall: `{arg}`\nRun `neomist uninstall --help` for usage."
-                ));
-            }
-        }
-    }
-
-    if !confirmed {
-        return Err(eyre::eyre!("Uninstall requires --yes"));
-    }
-
-    Ok(CliCommand::Uninstall)
 }
 
 fn init_services(
@@ -492,7 +397,7 @@ fn uninstall() -> Result<()> {
     let needs_root = running_as_root || certs::uninstall_requires_root(&data_dir)?;
 
     if needs_root {
-        ensure_root_command("uninstall")?;
+        ensure_root_command("system uninstall")?;
         dns::uninstall_dns_setup_noninteractive()?;
     } else {
         dns::uninstall_dns_setup()?;
@@ -503,69 +408,10 @@ fn uninstall() -> Result<()> {
     Ok(())
 }
 
-fn install_certs() -> Result<()> {
-    let data_dir = data_dir()?;
-    let cert_manager = CertManager::new(&data_dir);
-    cert_manager
-        .ensure_certs()
-        .wrap_err("Failed to create certificates")?;
-    if !cert_manager
-        .is_root_installed()
-        .wrap_err("Failed to verify root certificate")?
-    {
-        cert_manager
-            .install_root_cert()
-            .wrap_err("Failed to install root certificate")?;
-    }
-    if !cert_manager
-        .is_root_installed()
-        .wrap_err("Failed to verify root certificate")?
-    {
-        return Err(eyre::eyre!("Root certificate not installed"));
-    }
-
-    println!("NeoMist certificates installed.");
-    Ok(())
-}
-
-fn prepare_certs() -> Result<()> {
-    let data_dir = data_dir()?;
-    let cert_manager = CertManager::new(&data_dir);
-    cert_manager
-        .ensure_certs()
-        .wrap_err("Failed to create certificates")?;
-    println!("NeoMist certificate files prepared.");
-    Ok(())
-}
-
-fn install_dns() -> Result<()> {
-    ensure_root_command("install-dns")?;
-    dns::ensure_dns_setup_noninteractive()?;
-    println!("NeoMist DNS resolvers installed.");
-    Ok(())
-}
-
 fn install_system() -> Result<()> {
-    ensure_root_command("install-system")?;
+    ensure_root_command("system install")?;
     app_setup::install_system_for_current_exe()?;
     println!("NeoMist system integration installed.");
-    Ok(())
-}
-
-fn uninstall_certs_cmd() -> Result<()> {
-    let data_dir = data_dir()?;
-    if certs::uninstall_requires_root(&data_dir)? {
-        ensure_root_command("uninstall-certs")?;
-    }
-    certs::uninstall_certs(&data_dir)?;
-    println!("NeoMist certificates removed.");
-    Ok(())
-}
-
-fn uninstall_dns_cmd() -> Result<()> {
-    ensure_root_command("uninstall-dns")?;
-    dns::uninstall_dns_setup_noninteractive()?;
-    println!("NeoMist DNS resolvers removed.");
     Ok(())
 }
 

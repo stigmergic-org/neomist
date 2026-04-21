@@ -117,6 +117,14 @@ impl CertManager {
         }
     }
 
+    pub fn install_root_cert_for_system(&self) -> Result<()> {
+        match std::env::consts::OS {
+            "macos" => install_root_macos_system(&self.root_cert_path),
+            "linux" => install_root_linux(&self.root_cert_path),
+            other => Err(eyre::eyre!("Unsupported OS for cert install: {other}")),
+        }
+    }
+
     pub fn is_root_installed(&self) -> Result<bool> {
         match std::env::consts::OS {
             "macos" => is_root_installed_macos(&self.root_cert_path),
@@ -385,6 +393,27 @@ fn install_root_macos(cert_path: &Path) -> Result<()> {
     if !status.success() {
         return Err(eyre::eyre!("Root cert install failed"));
     }
+    Ok(())
+}
+
+fn install_root_macos_system(cert_path: &Path) -> Result<()> {
+    let status = Command::new(security_bin())
+        .arg("add-trusted-cert")
+        .arg("-d")
+        .arg("-r")
+        .arg("trustRoot")
+        .arg("-k")
+        .arg(SYSTEM_KEYCHAIN_PATH)
+        .arg(cert_path)
+        .status()
+        .wrap_err("Failed to install root certificate into system keychain")?;
+
+    if !status.success() {
+        return Err(eyre::eyre!(
+            "System keychain root certificate install failed"
+        ));
+    }
+
     Ok(())
 }
 

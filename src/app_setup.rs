@@ -9,11 +9,12 @@ use eyre::{Result, WrapErr};
 use tracing::info;
 
 use crate::certs::CertManager;
-use crate::config::{AppConfig, save_config};
+use crate::config::{AppConfig, data_dir, save_config};
 use crate::dns;
 
 const APPLICATIONS_DIR: &str = "/Applications";
 const CLI_LINK_PATH: &str = "/usr/local/bin/neomist";
+const NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV: &str = "NEOMIST_SKIP_SYSTEM_CERT_TRUST";
 
 pub fn prepare_runtime_setup(
     mut config: AppConfig,
@@ -127,7 +128,7 @@ pub fn prepare_runtime_setup(
 
 pub fn install_system_for_current_exe() -> Result<()> {
     if std::env::consts::OS != "macos" {
-        return Err(eyre::eyre!("install-system is only supported on macOS"));
+        return Err(eyre::eyre!("system install is only supported on macOS"));
     }
 
     if let Some(bundle_path) = current_app_bundle()? {
@@ -139,6 +140,10 @@ pub fn install_system_for_current_exe() -> Result<()> {
     }
 
     let exe_path = current_exe_path()?;
+    let cert_data_dir = data_dir()?;
+    if std::env::var_os(NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV).is_none() {
+        ensure_system_cert_trust(&cert_data_dir)?;
+    }
     dns::ensure_dns_setup_noninteractive()?;
     install_cli_link(&exe_path)?;
     Ok(())
@@ -159,6 +164,27 @@ fn ensure_trusted_certs(data_dir: &Path) -> Result<()> {
     {
         cert_manager
             .install_root_cert()
+            .wrap_err("Failed to install root certificate")?;
+    }
+    if !cert_manager
+        .is_root_installed()
+        .wrap_err("Failed to verify root certificate")?
+    {
+        return Err(eyre::eyre!("Root certificate not installed"));
+    }
+
+    Ok(())
+}
+
+fn ensure_system_cert_trust(data_dir: &Path) -> Result<()> {
+    let cert_manager = CertManager::new(data_dir);
+    ensure_local_cert_files(data_dir)?;
+    if !cert_manager
+        .is_root_installed()
+        .wrap_err("Failed to verify root certificate")?
+    {
+        cert_manager
+            .install_root_cert_for_system()
             .wrap_err("Failed to install root certificate")?;
     }
     if !cert_manager
@@ -297,7 +323,11 @@ fn install_cli_link(target: &Path) -> Result<()> {
 
 fn prompt_install_system_for_current_exe() -> Result<()> {
     let exe_path = current_exe_path()?;
-    let shell_command = format!("{} install-system --yes", shell_quote(&exe_path));
+    let shell_command = format!(
+        "{}=1 {} system install --yes",
+        NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV,
+        shell_quote(&exe_path)
+    );
     let script = format!(
         "do shell script {} with administrator privileges",
         applescript_quote(&shell_command)

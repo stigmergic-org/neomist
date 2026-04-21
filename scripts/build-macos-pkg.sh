@@ -5,7 +5,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="${NEOMIST_APP_NAME:-NeoMist}"
 EXECUTABLE_NAME="${NEOMIST_EXECUTABLE_NAME:-neomist}"
-APP_DIR_NAME="${NEOMIST_APP_DIR_NAME:-neomist}"
 PKG_IDENTIFIER="${NEOMIST_PKG_IDENTIFIER:-org.neomist.pkg}"
 COMPONENT_PKG_IDENTIFIER="${NEOMIST_COMPONENT_PKG_IDENTIFIER:-${PKG_IDENTIFIER}.component}"
 PROFILE="${NEOMIST_PROFILE:-release}"
@@ -32,7 +31,6 @@ Options:
 Environment:
   NEOMIST_APP_NAME                 App bundle name (default: NeoMist)
   NEOMIST_EXECUTABLE_NAME          Binary name inside app (default: neomist)
-  NEOMIST_APP_DIR_NAME             User data dir name (default: neomist)
   NEOMIST_PKG_IDENTIFIER           Installer package identifier
   NEOMIST_COMPONENT_PKG_IDENTIFIER Component package identifier
   NEOMIST_PROFILE                  Cargo profile used by app builder
@@ -130,7 +128,6 @@ cp -R "$APP_PATH" "${PAYLOAD_ROOT}/Applications/${APP_NAME}.app"
 sed \
     -e "s|__APP_NAME__|${APP_NAME}|g" \
     -e "s|__EXECUTABLE_NAME__|${EXECUTABLE_NAME}|g" \
-    -e "s|__APP_DIR_NAME__|${APP_DIR_NAME}|g" \
     "$SCRIPT_TEMPLATE" > "${SCRIPT_ROOT}/postinstall"
 chmod 755 "${SCRIPT_ROOT}/postinstall"
 

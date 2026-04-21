@@ -31,8 +31,7 @@ Bundle defaults:
 Current `pkg` flow installs:
 
 - `NeoMist.app` into `/Applications`
-- local certificate files for current console user during package `postinstall`
-- root certificate trust into system keychain during package `postinstall`
+- NeoMist certificate files and trust for current console user during package `postinstall`
 - DNS resolver files during package `postinstall`
 - `/usr/local/bin/neomist` symlink during package `postinstall`
 
