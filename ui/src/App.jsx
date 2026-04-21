@@ -1616,6 +1616,8 @@ function SettingsPage() {
   const [status, setStatus] = useState({ type: '', message: '' });
   const [about, setAbout] = useState(null);
   const [aboutError, setAboutError] = useState('');
+  const [rpcCopyStatus, setRpcCopyStatus] = useState('');
+  const rpcCopyResetRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
@@ -1660,6 +1662,12 @@ function SettingsPage() {
     return () => {
       mounted = false;
     };
+  }, []);
+
+  useEffect(() => () => {
+    if (rpcCopyResetRef.current) {
+      window.clearTimeout(rpcCopyResetRef.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -1782,6 +1790,7 @@ function SettingsPage() {
   const neomistVersion = about?.neomist?.version || (aboutError ? 'Unavailable' : 'Loading...');
   const heliosVersion = about?.helios?.version || (aboutError ? 'Unavailable' : 'Loading...');
   const kuboVersion = about?.kubo?.version || (aboutError ? 'Unavailable' : 'Loading...');
+  const localRpcUrl = `${window.location.origin}/rpc`;
   const kuboDetail = about?.kubo?.mode === 'external'
     ? 'Using external IPFS instance'
     : about?.kubo?.mode === 'managed'
@@ -1789,6 +1798,40 @@ function SettingsPage() {
       : aboutError
         ? 'Could not load IPFS runtime info'
         : 'Inspecting local IPFS runtime';
+
+  const copyLocalRpcUrl = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(localRpcUrl);
+      } else {
+        const input = document.createElement('textarea');
+        input.value = localRpcUrl;
+        input.setAttribute('readonly', '');
+        input.style.position = 'absolute';
+        input.style.left = '-9999px';
+        document.body.appendChild(input);
+        input.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(input);
+        if (!copied) {
+          throw new Error('Copy failed');
+        }
+      }
+
+      setRpcCopyStatus('copied');
+    } catch {
+      setRpcCopyStatus('failed');
+    }
+
+    if (rpcCopyResetRef.current) {
+      window.clearTimeout(rpcCopyResetRef.current);
+    }
+
+    rpcCopyResetRef.current = window.setTimeout(() => {
+      setRpcCopyStatus('');
+      rpcCopyResetRef.current = null;
+    }, 2500);
+  };
 
   return (
     <section className="mx-auto max-w-[920px]">
@@ -1950,6 +1993,41 @@ function SettingsPage() {
                 max="10080"
               />
               <span className="text-sm text-base-content/60">minutes (0 to disable)</span>
+            </div>
+          </div>
+
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <label className="block text-sm font-medium">Local RPC</label>
+                <p className="mt-2 max-w-2xl text-sm text-base-content/55">
+                  NeoMist exposes a local JSON-RPC endpoint backed by Helios. Requests stay on this machine and use your configured consensus and execution fallbacks.
+                </p>
+              </div>
+
+              <StatusPill tone={rpcCopyStatus === 'copied' ? 'success' : rpcCopyStatus === 'failed' ? 'warning' : 'info'}>
+                {rpcCopyStatus === 'copied'
+                  ? 'Copied'
+                  : rpcCopyStatus === 'failed'
+                    ? 'Copy failed'
+                    : 'JSON-RPC'}
+              </StatusPill>
+            </div>
+
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+              <input
+                className={classNames(INPUT_CLASS, 'font-mono text-sm')}
+                value={localRpcUrl}
+                readOnly
+                aria-label="Local RPC endpoint"
+              />
+              <button
+                type="button"
+                className={classNames(SECONDARY_BUTTON_CLASS, 'shrink-0 px-4')}
+                onClick={copyLocalRpcUrl}
+              >
+                Copy endpoint
+              </button>
             </div>
           </div>
         </div>

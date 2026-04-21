@@ -363,7 +363,6 @@ fn update_gateway_config(repo_dir: &Path, gateway_port: u16) -> Result<()> {
 
     config["API"]["HTTPHeaders"] = serde_json::json!({
         "Access-Control-Allow-Origin": [
-            "https://webui.ipfs.io",
             "https://ipfs.localhost",
             "http://127.0.0.1:5001"
         ],

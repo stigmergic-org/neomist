@@ -6,8 +6,8 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{
-    Request, Response, StatusCode,
-    header::{CACHE_CONTROL, CONTENT_TYPE, HOST},
+    HeaderMap, Request, Response, StatusCode,
+    header::{CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN, REFERER},
 };
 use axum::response::{IntoResponse, Json};
 use axum::routing::{any, get, post};
@@ -31,6 +31,7 @@ use crate::state::AppState;
 
 const PRIMARY_HTTPS_PORT: u16 = 443;
 const FALLBACK_HTTPS_PORT: u16 = 8443;
+const NEOMIST_UI_HOST: &str = "neomist.localhost";
 static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 static IPFS_PROXY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static HELIOS_VERSION: OnceLock<String> = OnceLock::new();
@@ -266,6 +267,48 @@ async fn run_https_listener(
     }
 }
 
+fn require_neomist_ui_request(
+    headers: &HeaderMap,
+) -> std::result::Result<(), Response<Body>> {
+    if request_origin_matches_neomist_ui(headers) {
+        return Ok(());
+    }
+
+    Err(Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(Body::from("Forbidden"))
+        .unwrap())
+}
+
+fn request_origin_matches_neomist_ui(headers: &HeaderMap) -> bool {
+    if let Some(origin) = headers.get(ORIGIN) {
+        return url_header_matches_neomist_ui(origin);
+    }
+
+    if let Some(referer) = headers.get(REFERER) {
+        return url_header_matches_neomist_ui(referer);
+    }
+
+    false
+}
+
+fn url_header_matches_neomist_ui(value: &axum::http::HeaderValue) -> bool {
+    let raw = match value.to_str() {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let parsed = match url::Url::parse(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+
+    parsed.scheme() == "https"
+        && parsed
+            .host_str()
+            .map(|host| host.eq_ignore_ascii_case(NEOMIST_UI_HOST))
+            .unwrap_or(false)
+}
+
 async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.config.read().await.clone();
     Json(config)
@@ -273,8 +316,13 @@ async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn save_config_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(mut new_config): Json<AppConfig>,
-) -> impl IntoResponse {
+) -> Response<Body> {
+    if let Err(response) = require_neomist_ui_request(&headers) {
+        return response;
+    }
+
     let mut config_guard = state.config.write().await;
     
     // Preserve internal state flags from the current config
@@ -286,13 +334,15 @@ async fn save_config_handler(
         Ok(_) => Json(SaveResponse {
             success: true,
             error: None,
-        }),
+        })
+        .into_response(),
         Err(err) => {
             error!("Failed to save config: {err}");
             Json(SaveResponse {
                 success: false,
                 error: Some(err.to_string()),
             })
+            .into_response()
         }
     }
 }
@@ -383,6 +433,10 @@ async fn get_total_storage(State(state): State<AppState>) -> Response<Body> {
 }
 
 async fn toggle_auto_seed(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
+    if let Err(response) = require_neomist_ui_request(req.headers()) {
+        return response;
+    }
+
     let query = req.uri().query().unwrap_or("");
     let params: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(query.as_bytes())
@@ -415,6 +469,10 @@ async fn toggle_auto_seed(State(state): State<AppState>, req: Request<Body>) -> 
 }
 
 async fn clear_cache(State(state): State<AppState>, req: Request<Body>) -> Response<Body> {
+    if let Err(response) = require_neomist_ui_request(req.headers()) {
+        return response;
+    }
+
     let query = req.uri().query().unwrap_or("");
     let params: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(query.as_bytes())
@@ -711,6 +769,52 @@ async fn proxy_rpc(
     builder
         .body(Body::from(bytes))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_origin_matches_neomist_ui;
+    use axum::http::{HeaderMap, HeaderValue, header::{ORIGIN, REFERER}};
+
+    #[test]
+    fn accepts_neomist_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_static("https://neomist.localhost"));
+
+        assert!(request_origin_matches_neomist_ui(&headers));
+    }
+
+    #[test]
+    fn accepts_neomist_origin_with_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_static("https://neomist.localhost:8443"));
+
+        assert!(request_origin_matches_neomist_ui(&headers));
+    }
+
+    #[test]
+    fn accepts_neomist_referer_when_origin_is_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            REFERER,
+            HeaderValue::from_static("https://neomist.localhost/settings"),
+        );
+
+        assert!(request_origin_matches_neomist_ui(&headers));
+    }
+
+    #[test]
+    fn rejects_cross_site_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
+
+        assert!(!request_origin_matches_neomist_ui(&headers));
+    }
+
+    #[test]
+    fn rejects_missing_browser_context_headers() {
+        assert!(!request_origin_matches_neomist_ui(&HeaderMap::new()));
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {

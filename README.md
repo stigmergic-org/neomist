@@ -27,6 +27,7 @@ NeoMist is a local-first desktop app for browsing `.eth` and `.wei` sites withou
 ## Local Endpoints
 
 - `https://neomist.localhost` for the dashboard, launcher, settings, and seeding UI
+- `https://neomist.localhost/rpc` for loopback-only JSON-RPC access backed by the embedded Helios client
 - `https://ipfs.localhost/webui` for the local IPFS WebUI
 - `https://<cid>.ipfs.localhost` for the local IPFS gateway
 - `https://<name>.eth` and `https://<name>.wei` once NeoMist installs local DNS integration
