@@ -50,6 +50,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -3788,6 +3789,12 @@ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "hashbrown"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43a3c133739dddd0d2990f9a4bdf8eb4b21ef50e4851ca85ab661199821d510e"
+
+[[package]]
+name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
@@ -3843,8 +3850,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "helios"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "helios-common",
  "helios-core",
@@ -3854,8 +3861,8 @@ dependencies = [
 
 [[package]]
 name = "helios-common"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "async-trait",
@@ -3870,8 +3877,8 @@ dependencies = [
 
 [[package]]
 name = "helios-consensus-core"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "alloy-rlp",
@@ -3894,8 +3901,8 @@ dependencies = [
 
 [[package]]
 name = "helios-core"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "alloy-trie",
@@ -3911,6 +3918,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "reqwest",
  "revm",
+ "schnellru",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3923,8 +3931,8 @@ dependencies = [
 
 [[package]]
 name = "helios-ethereum"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "alloy-trie",
@@ -3961,8 +3969,8 @@ dependencies = [
 
 [[package]]
 name = "helios-opstack"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "alloy-rlp",
@@ -4007,8 +4015,8 @@ dependencies = [
 
 [[package]]
 name = "helios-revm-utils"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "eyre",
@@ -4022,8 +4030,8 @@ dependencies = [
 
 [[package]]
 name = "helios-verifiable-api-client"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "async-trait",
@@ -4041,8 +4049,8 @@ dependencies = [
 
 [[package]]
 name = "helios-verifiable-api-types"
-version = "0.11.0"
-source = "git+https://github.com/a16z/helios?branch=master#582fda319ed1ecb5fb82c71f4fa755a32e01031a"
+version = "0.11.1"
+source = "git+https://github.com/a16z/helios?branch=master#204c998a927348e1c000a664f08d5b37b1b0d924"
 dependencies = [
  "alloy",
  "helios-common",
@@ -4386,7 +4394,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -6138,7 +6146,7 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff32365de1b6743cb203b710788263c44a03de03802daf96092f2da4fe6ba4d7"
 dependencies = [
- "proc-macro-crate 3.4.0",
+ "proc-macro-crate 2.0.2",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8030,6 +8038,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "schnellru"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "356285bbf17bea63d9e52e96bd18f039672ac92b55b8cb997d6162a2a37d1649"
+dependencies = [
+ "ahash",
+ "cfg-if",
+ "hashbrown 0.13.2",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9871,19 +9890,6 @@ dependencies = [
  "windows-link 0.1.3",
  "windows-result 0.3.4",
  "windows-strings 0.4.2",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement",
- "windows-interface",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
- "windows-strings 0.5.1",
 ]
 
 [[package]]

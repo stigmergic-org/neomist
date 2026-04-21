@@ -1785,7 +1785,7 @@ function SettingsPage() {
   const kuboDetail = about?.kubo?.mode === 'external'
     ? 'Using external IPFS instance'
     : about?.kubo?.mode === 'managed'
-      ? 'Managed by NeoMist'
+      ? 'IPFS managed by NeoMist'
       : aboutError
         ? 'Could not load IPFS runtime info'
         : 'Inspecting local IPFS runtime';
@@ -1980,7 +1980,7 @@ function SettingsPage() {
             <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
               <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Helios</p>
               <p className="mt-2 text-lg font-semibold tracking-tight">{heliosVersion}</p>
-              <p className="mt-2 text-sm text-base-content/55">Consensus light client</p>
+              <p className="mt-2 text-sm text-base-content/55">Ethereum light client</p>
             </div>
 
             <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">

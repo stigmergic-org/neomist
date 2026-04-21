@@ -14,7 +14,7 @@ use hex::encode as hex_encode;
 use sha2::{Digest, Sha512};
 use tar::Archive;
 
-const KUBO_VERSION: &str = "v0.39.0";
+const KUBO_VERSION: &str = "v0.40.1";
 const IPFS_API_PORT: u16 = 5001;
 const MANAGED_GATEWAY_PORT: u16 = 58080;
 const KUBO_DIST_BASE: &str = "https://dist.ipfs.tech/kubo";
@@ -185,9 +185,30 @@ async fn download_kubo(
     let ipfs_path = bin_dir.join("ipfs");
     if ipfs_path.exists() {
         if ipfs_path.is_file() {
-            return Ok(ipfs_path);
+            match installed_kubo_version(&ipfs_path)? {
+                Some(installed_version)
+                    if normalized_kubo_version(&installed_version)
+                        == normalized_kubo_version(KUBO_VERSION) =>
+                {
+                    tracing::info!("Using cached Kubo {installed_version}");
+                    return Ok(ipfs_path);
+                }
+                Some(installed_version) => {
+                    tracing::info!(
+                        "Replacing cached Kubo {installed_version} with {KUBO_VERSION}"
+                    );
+                }
+                None => {
+                    tracing::info!(
+                        "Replacing cached Kubo binary because installed version could not be determined"
+                    );
+                }
+            }
+
+            fs::remove_file(&ipfs_path).wrap_err("Failed to remove stale kubo binary")?;
+        } else {
+            fs::remove_dir_all(&ipfs_path).wrap_err("Failed to remove stale kubo directory")?;
         }
-        fs::remove_dir_all(&ipfs_path).wrap_err("Failed to remove stale kubo directory")?;
     }
 
     let checksum_url = format!("{KUBO_DIST_BASE}/{KUBO_VERSION}/{checksum_name}");
@@ -270,6 +291,37 @@ fn set_ipfs_permissions(ipfs_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn installed_kubo_version(ipfs_path: &Path) -> Result<Option<String>> {
+    let output = Command::new(ipfs_path)
+        .arg("version")
+        .arg("--number")
+        .output()
+        .wrap_err("Failed to run cached kubo version check")?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "Cached kubo version check failed (status: {}). stdout: {} stderr: {}",
+            output.status,
+            stdout.trim(),
+            stderr.trim()
+        );
+        return Ok(None);
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(version))
+}
+
+fn normalized_kubo_version(version: &str) -> &str {
+    version.trim().trim_start_matches('v')
 }
 
 fn ensure_repo_initialized(ipfs_path: &Path, repo_dir: &Path) -> Result<()> {
