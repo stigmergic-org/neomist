@@ -1099,7 +1099,7 @@ function CheckpointPanel({ checkpoints, error }) {
     <section className={classNames(PANEL_CLASS, 'p-6')}>
       <h2 className="text-2xl font-semibold tracking-tight">Consensus checkpoints</h2>
       <p className="mt-2 text-sm leading-6 text-base-content/65">
-        Compare these checkpoints with a friend to ensure you are seeing the same version of reality.
+        Compare these checkpoints with a friend to ensure you see the same version of reality.
       </p>
 
       <div className="mt-6 grid gap-3">

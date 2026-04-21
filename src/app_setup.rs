@@ -144,6 +144,7 @@ pub fn install_system_for_current_exe() -> Result<()> {
     if std::env::var_os(NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV).is_none() {
         ensure_system_cert_trust(&cert_data_dir)?;
     }
+    restore_sudo_user_data_dir_ownership(&cert_data_dir)?;
     dns::ensure_dns_setup_noninteractive()?;
     install_cli_link(&exe_path)?;
     Ok(())
@@ -195,6 +196,53 @@ fn ensure_system_cert_trust(data_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn restore_sudo_user_data_dir_ownership(data_dir: &Path) -> Result<()> {
+    let Ok(user) = env::var("SUDO_USER") else {
+        return Ok(());
+    };
+
+    if user.is_empty() || user == "root" {
+        return Ok(());
+    }
+
+    let Some(share_dir) = data_dir.parent() else {
+        return Ok(());
+    };
+    let Some(local_dir) = share_dir.parent() else {
+        return Ok(());
+    };
+
+    chown_path_to_user(local_dir, &user, false)?;
+    chown_path_to_user(share_dir, &user, false)?;
+    chown_path_to_user(data_dir, &user, true)?;
+    Ok(())
+}
+
+fn chown_path_to_user(path: &Path, user: &str, recursive: bool) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let mut command = Command::new("chown");
+    if recursive {
+        command.arg("-R");
+    }
+    let status = command
+        .arg(user)
+        .arg(path)
+        .status()
+        .wrap_err_with(|| format!("Failed to update ownership for {}", path.display()))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Failed to update ownership for {}",
+            path.display()
+        ))
+    }
 }
 
 fn maybe_install_dns(mut config: AppConfig, config_path: &Path) -> Result<AppConfig> {

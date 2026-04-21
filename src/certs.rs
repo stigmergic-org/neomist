@@ -1,4 +1,6 @@
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -13,6 +15,7 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use sha1::{Digest, Sha1};
+use tracing::warn;
 
 use crate::constants::{CA_CERT_DIR, CA_CERT_PREFIX};
 
@@ -26,6 +29,9 @@ const LOCAL_UI_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST];
 const LOCAL_UI_CERT_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST, IPFS_GATEWAY_WILDCARD_HOST];
 const NEOMIST_USER_HOME_ENV: &str = "NEOMIST_USER_HOME";
 const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
+const CERT_DIR_MODE: u32 = 0o700;
+const PRIVATE_KEY_MODE: u32 = 0o600;
+const CERT_FILE_MODE: u32 = 0o644;
 
 #[derive(Debug)]
 pub struct CertManager {
@@ -56,6 +62,8 @@ impl CertManager {
 
     pub fn ensure_certs(&self) -> Result<()> {
         fs::create_dir_all(&self.cert_dir).wrap_err("Failed to create cert dir")?;
+        best_effort_set_existing_path_mode(&self.cert_dir, CERT_DIR_MODE)
+            .wrap_err("Failed to secure cert directory permissions")?;
 
         let have_base = self.intermediate_eth_key.exists()
             && self.intermediate_eth_cert.exists()
@@ -66,28 +74,25 @@ impl CertManager {
             && self.root_cert_path.exists();
 
         if have_base {
+            self.harden_permissions()?;
             return Ok(());
         }
 
         cleanup_cert_files(self.cert_dir.parent().unwrap_or(&self.cert_dir))?;
         fs::create_dir_all(&self.cert_dir).wrap_err("Failed to create cert dir")?;
+        set_path_mode(&self.cert_dir, CERT_DIR_MODE)
+            .wrap_err("Failed to secure cert directory permissions")?;
 
-        let root_key_pem = generate_ec_key_pem()?;
-        let root_key_path = self.cert_dir.join(".temp-root-key.pem");
-        fs::write(&root_key_path, &root_key_pem).wrap_err("Failed to write temp root key")?;
-
-        create_root_cert(&root_key_path, &self.root_cert_path)?;
+        let root_cert = create_root_cert(&self.root_cert_path)?;
         create_intermediate(
-            &root_key_path,
-            &self.root_cert_path,
+            &root_cert,
             &self.intermediate_eth_key,
             &self.intermediate_eth_cert,
             INTERMEDIATE_ETH_COMMON_NAME,
             ".eth",
         )?;
         create_intermediate(
-            &root_key_path,
-            &self.root_cert_path,
+            &root_cert,
             &self.intermediate_wei_key,
             &self.intermediate_wei_cert,
             INTERMEDIATE_WEI_COMMON_NAME,
@@ -96,16 +101,15 @@ impl CertManager {
 
         ensure_server_key(&self.server_key_path)?;
 
-        create_leaf_cert(
-            &root_key_path,
-            &self.root_cert_path,
+        create_leaf_cert_with_signer(
+            &root_cert,
             &self.server_key_path,
             &self.ethereum_cert_path,
             LOCAL_UI_HOST,
             LOCAL_UI_CERT_HOSTS.to_vec(),
         )?;
 
-        fs::remove_file(&root_key_path).wrap_err("Failed to delete temp root key")?;
+        self.harden_permissions()?;
         Ok(())
     }
 
@@ -201,6 +205,45 @@ impl CertManager {
 
         load_leaf_chain_with_chain(&cert_path, &chain, &self.server_key_path)
     }
+
+    fn harden_permissions(&self) -> Result<()> {
+        best_effort_set_existing_path_mode(&self.cert_dir, CERT_DIR_MODE)?;
+
+        for path in [
+            &self.intermediate_eth_key,
+            &self.intermediate_wei_key,
+            &self.server_key_path,
+        ] {
+            if path.exists() {
+                best_effort_set_existing_path_mode(path, PRIVATE_KEY_MODE)?;
+            }
+        }
+
+        for path in [
+            &self.root_cert_path,
+            &self.intermediate_eth_cert,
+            &self.intermediate_wei_cert,
+            &self.ethereum_cert_path,
+        ] {
+            if path.exists() {
+                best_effort_set_existing_path_mode(path, CERT_FILE_MODE)?;
+            }
+        }
+
+        for entry in fs::read_dir(&self.cert_dir).wrap_err("Failed to read cert directory")? {
+            let entry = entry.wrap_err("Failed to inspect cert directory entry")?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if file_name.starts_with("wildcard-") && file_name.ends_with("-cert.pem") {
+                best_effort_set_existing_path_mode(&path, CERT_FILE_MODE)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 pub fn uninstall_certs(data_dir: &Path) -> Result<()> {
@@ -222,35 +265,32 @@ pub fn root_cert_path(data_dir: &Path) -> PathBuf {
     data_dir.join("certs").join("root-ca-cert.pem")
 }
 
-fn generate_ec_key_pem() -> Result<String> {
+fn generate_ec_key_pair() -> Result<KeyPair> {
     KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
-        .map(|key_pair| key_pair.serialize_pem())
         .wrap_err("Failed to generate EC key")
 }
 
-fn create_root_cert(root_key: &Path, root_cert: &Path) -> Result<()> {
+fn create_root_cert(root_cert: &Path) -> Result<Certificate> {
     let mut params = CertificateParams::new(Vec::<String>::new());
     params.alg = &PKCS_ECDSA_P256_SHA256;
-    params.key_pair = Some(load_key_pair(root_key)?);
+    params.key_pair = Some(generate_ec_key_pair()?);
     params.distinguished_name = neomist_distinguished_name(ROOT_COMMON_NAME);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
 
     let cert = Certificate::from_params(params).wrap_err("Failed to build root cert")?;
     let pem = cert.serialize_pem().wrap_err("Failed to serialize root cert")?;
-    fs::write(root_cert, pem).wrap_err("Failed to write root cert")?;
-    Ok(())
+    write_pem_file(root_cert, &pem, CERT_FILE_MODE).wrap_err("Failed to write root cert")?;
+    Ok(cert)
 }
 
 fn create_intermediate(
-    root_key: &Path,
-    root_cert: &Path,
+    signer: &Certificate,
     key_out: &Path,
     cert_out: &Path,
     common_name: &str,
     permitted_dns: &str,
 ) -> Result<()> {
-    let signer = load_signing_cert(root_cert, root_key)?;
     let key_pair = KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
         .wrap_err("Failed to generate intermediate key")?;
     let key_pem = key_pair.serialize_pem();
@@ -269,21 +309,24 @@ fn create_intermediate(
 
     let cert = Certificate::from_params(params).wrap_err("Failed to build intermediate cert")?;
     let cert_pem = cert
-        .serialize_pem_with_signer(&signer)
+        .serialize_pem_with_signer(signer)
         .wrap_err("Failed to sign intermediate cert")?;
 
-    fs::write(key_out, key_pem).wrap_err("Failed to write intermediate key")?;
-    fs::write(cert_out, cert_pem).wrap_err("Failed to write intermediate cert")?;
+    write_pem_file(key_out, &key_pem, PRIVATE_KEY_MODE)
+        .wrap_err("Failed to write intermediate key")?;
+    write_pem_file(cert_out, &cert_pem, CERT_FILE_MODE)
+        .wrap_err("Failed to write intermediate cert")?;
     Ok(())
 }
 
 fn ensure_server_key(path: &Path) -> Result<()> {
     if path.exists() {
+        set_path_mode(path, PRIVATE_KEY_MODE).wrap_err("Failed to secure server key permissions")?;
         return Ok(());
     }
-    let key_pair = KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
-        .wrap_err("Failed to generate server key")?;
-    fs::write(path, key_pair.serialize_pem()).wrap_err("Failed to write server key")?;
+    let key_pair = generate_ec_key_pair().wrap_err("Failed to generate server key")?;
+    write_pem_file(path, &key_pair.serialize_pem(), PRIVATE_KEY_MODE)
+        .wrap_err("Failed to write server key")?;
     Ok(())
 }
 
@@ -296,6 +339,16 @@ fn create_leaf_cert(
     sans: Vec<&str>,
 ) -> Result<()> {
     let signer = load_signing_cert(signer_cert, signer_key)?;
+    create_leaf_cert_with_signer(&signer, key_path, cert_out, subject_cn, sans)
+}
+
+fn create_leaf_cert_with_signer(
+    signer: &Certificate,
+    key_path: &Path,
+    cert_out: &Path,
+    subject_cn: &str,
+    sans: Vec<&str>,
+) -> Result<()> {
     let key_pair = load_key_pair(key_path)?;
 
     let mut params = CertificateParams::new(Vec::<String>::new());
@@ -313,10 +366,52 @@ fn create_leaf_cert(
 
     let cert = Certificate::from_params(params).wrap_err("Failed to build leaf cert")?;
     let cert_pem = cert
-        .serialize_pem_with_signer(&signer)
+        .serialize_pem_with_signer(signer)
         .wrap_err("Failed to sign leaf cert")?;
-    fs::write(cert_out, cert_pem).wrap_err("Failed to write leaf cert")?;
+    write_pem_file(cert_out, &cert_pem, CERT_FILE_MODE).wrap_err("Failed to write leaf cert")?;
     Ok(())
+}
+
+fn write_pem_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(mode)
+        .open(path)
+        .wrap_err_with(|| format!("Failed to open {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .wrap_err_with(|| format!("Failed to write {}", path.display()))?;
+    set_path_mode(path, mode).wrap_err_with(|| format!("Failed to secure {}", path.display()))?;
+    Ok(())
+}
+
+fn set_path_mode(path: &Path, mode: u32) -> Result<()> {
+    let permissions = fs::Permissions::from_mode(mode);
+    fs::set_permissions(path, permissions)
+        .wrap_err_with(|| format!("Failed to set permissions on {}", path.display()))
+}
+
+fn best_effort_set_existing_path_mode(path: &Path, mode: u32) -> Result<()> {
+    match set_path_mode(path, mode) {
+        Ok(()) => Ok(()),
+        Err(err) if path.exists() && is_permission_denied(&err) => {
+            warn!(
+                "Skipping permission hardening for {}: {err}",
+                path.display()
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn is_permission_denied(err: &eyre::Report) -> bool {
+    err.chain().any(|source| {
+        source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::PermissionDenied)
+    })
 }
 
 fn is_ipfs_gateway_host(host: &str) -> bool {

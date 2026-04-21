@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 
 use axum::Router;
@@ -42,7 +42,7 @@ struct SaveResponse {
 
 pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager>) -> Result<()> {
     info!(
-        "Starting HTTPS server for node.localhost, neomist.localhost, ipfs.localhost, and *.ipfs.localhost"
+        "Starting local-only HTTPS server for node.localhost, neomist.localhost, ipfs.localhost, and *.ipfs.localhost"
     );
     let eth_router = Router::new()
         .route("/rpc", post(proxy_rpc))
@@ -72,32 +72,86 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         .route("/*path", any(proxy_ipfs_gateway))
         .with_state(state.clone());
 
-    let primary_addr = SocketAddr::from(([0, 0, 0, 0], PRIMARY_HTTPS_PORT));
-    let fallback_addr = SocketAddr::from(([0, 0, 0, 0], FALLBACK_HTTPS_PORT));
+    let mut listeners = bind_https_sockets(PRIMARY_HTTPS_PORT).await;
+    if listeners.is_empty() {
+        warn!(
+            "Failed to bind HTTPS sockets on port {PRIMARY_HTTPS_PORT}. Falling back to port {FALLBACK_HTTPS_PORT}"
+        );
+        listeners = bind_https_sockets(FALLBACK_HTTPS_PORT).await;
+    }
 
-    let listener = match TcpListener::bind(primary_addr).await {
-        Ok(listener) => {
-            info!("HTTPS server listening on {primary_addr}");
-            listener
-        }
-        Err(err) => {
-            warn!("Failed to bind {primary_addr}: {err}. Falling back to {fallback_addr}");
-            let listener = TcpListener::bind(fallback_addr)
-                .await
-                .wrap_err("Failed to bind fallback HTTPS listener")?;
-            info!("HTTPS server listening on {fallback_addr}");
-            listener
-        }
-    };
+    if listeners.is_empty() {
+        return Err(eyre::eyre!(
+            "Failed to bind any HTTPS listener on ports {PRIMARY_HTTPS_PORT} or {FALLBACK_HTTPS_PORT}"
+        ));
+    }
 
     let tls_config = build_tls_config(certs)?;
     let acceptor = TlsAcceptor::from(std::sync::Arc::new(tls_config));
+    let mut listener_tasks = tokio::task::JoinSet::new();
 
+    for listener in listeners {
+        let local_addr = listener
+            .local_addr()
+            .wrap_err("Failed to inspect HTTPS listener address")?;
+        info!("HTTPS server listening on {local_addr}");
+
+        listener_tasks.spawn(run_https_listener(
+            listener,
+            acceptor.clone(),
+            eth_router.clone(),
+            ens_router.clone(),
+            ipfs_api_router.clone(),
+            ipfs_gateway_router.clone(),
+        ));
+    }
+
+    while let Some(result) = listener_tasks.join_next().await {
+        match result {
+            Ok(Ok(())) => warn!("HTTPS listener exited unexpectedly"),
+            Ok(Err(err)) => warn!("HTTPS listener error: {err}"),
+            Err(err) => warn!("HTTPS listener task failed: {err}"),
+        }
+    }
+
+    Err(eyre::eyre!("All HTTPS listeners exited"))
+}
+
+async fn bind_https_sockets(port: u16) -> Vec<TcpListener> {
+    let mut listeners = Vec::new();
+
+    for addr in [
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+    ] {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => listeners.push(listener),
+            Err(err) => warn!("Failed to bind HTTPS listener on {addr}: {err}"),
+        }
+    }
+
+    listeners
+}
+
+async fn run_https_listener(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    eth_router: Router,
+    ens_router: Router,
+    ipfs_api_router: Router,
+    ipfs_gateway_router: Router,
+) -> Result<()> {
     loop {
-        let (stream, _peer) = listener
+        let (stream, peer) = listener
             .accept()
             .await
             .wrap_err("Failed to accept connection")?;
+
+        if !peer.ip().is_loopback() {
+            warn!("Rejected non-loopback HTTPS connection from {peer}");
+            continue;
+        }
+
         let acceptor = acceptor.clone();
         let eth_router = eth_router.clone();
         let ens_router = ens_router.clone();
