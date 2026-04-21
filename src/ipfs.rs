@@ -80,6 +80,10 @@ impl KuboManager {
     }
 }
 
+pub fn bundled_kubo_version() -> &'static str {
+    KUBO_VERSION
+}
+
 pub async fn init_kubo(http_client: reqwest::Client, base_dir: PathBuf) -> Result<KuboManager> {
     tracing::info!("Starting IPFS (kubo)");
     tracing::info!("Checking for existing IPFS API on port {IPFS_API_PORT}");

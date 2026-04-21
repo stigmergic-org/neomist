@@ -33,11 +33,36 @@ const PRIMARY_HTTPS_PORT: u16 = 443;
 const FALLBACK_HTTPS_PORT: u16 = 8443;
 static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 static IPFS_PROXY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static HELIOS_VERSION: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug, serde::Serialize)]
 struct SaveResponse {
     success: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AboutResponse {
+    neomist: ComponentVersion,
+    helios: ComponentVersion,
+    kubo: KuboVersion,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ComponentVersion {
+    version: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct KuboVersion {
+    mode: String,
+    version: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct IpfsVersionResponse {
+    #[serde(rename = "Version")]
+    version: String,
 }
 
 pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager>) -> Result<()> {
@@ -47,6 +72,7 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
     let eth_router = Router::new()
         .route("/rpc", post(proxy_rpc))
         .route("/health", get(healthcheck))
+        .route("/api/about", get(get_about))
         .route("/api/cached-domains", get(get_cached_domains))
         .route("/api/total-storage", get(get_total_storage))
         .route("/api/toggle-auto-seed", post(toggle_auto_seed))
@@ -421,6 +447,62 @@ async fn get_checkpoints(State(state): State<AppState>) -> Response<Body> {
     let guard = state.checkpoint_history.read().await;
     let checkpoints: Vec<String> = guard.iter().cloned().collect();
     Json(serde_json::json!({ "checkpoints": checkpoints })).into_response()
+}
+
+async fn get_about(State(state): State<AppState>) -> Response<Body> {
+    let kubo_version = fetch_kubo_version(&state).await.unwrap_or_else(|| {
+        if state.managed_ipfs {
+            crate::ipfs::bundled_kubo_version().to_string()
+        } else {
+            "unknown".to_string()
+        }
+    });
+
+    Json(AboutResponse {
+        neomist: ComponentVersion {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        helios: ComponentVersion {
+            version: helios_version().to_string(),
+        },
+        kubo: KuboVersion {
+            mode: if state.managed_ipfs {
+                "managed".to_string()
+            } else {
+                "external".to_string()
+            },
+            version: kubo_version,
+        },
+    })
+    .into_response()
+}
+
+fn helios_version() -> &'static str {
+    HELIOS_VERSION
+        .get_or_init(|| locked_dependency_version("helios").unwrap_or_else(|| "unknown".to_string()))
+        .as_str()
+}
+
+fn locked_dependency_version(package: &str) -> Option<String> {
+    let lockfile = include_str!("../Cargo.lock");
+    let marker = format!("name = \"{package}\"\nversion = \"");
+    let start = lockfile.find(&marker)? + marker.len();
+    let end = lockfile[start..].find('"')? + start;
+    Some(lockfile[start..end].to_string())
+}
+
+async fn fetch_kubo_version(state: &AppState) -> Option<String> {
+    let response = state
+        .http_client
+        .post(format!("{}/api/v0/version", state.ipfs_api_url.trim_end_matches('/')))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    response.json::<IpfsVersionResponse>().await.ok().map(|body| body.version)
 }
 
 async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {

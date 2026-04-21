@@ -1,7 +1,7 @@
 import { generateFoamSvg } from '@simplepg/foam-identicon';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-const STARTER_DOMAINS = ['zfi.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth'];
+const STARTER_DOMAINS = ['zfi.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth', 'evmnow.eth'];
 const CHECKPOINT_REFRESH_MS = 60000;
 const SEEDING_REFRESH_MS = 30000;
 const RECENT_STORAGE_KEY = 'neomist.recent-domains';
@@ -1614,6 +1614,8 @@ function SettingsPage() {
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [initialConfig, setInitialConfig] = useState(null);
   const [status, setStatus] = useState({ type: '', message: '' });
+  const [about, setAbout] = useState(null);
+  const [aboutError, setAboutError] = useState('');
 
   useEffect(() => {
     let mounted = true;
@@ -1654,6 +1656,39 @@ function SettingsPage() {
     };
 
     void loadConfig();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const loadAbout = async () => {
+      try {
+        const response = await fetch('/api/about');
+        if (!response.ok) {
+          throw new Error('Failed to load version info');
+        }
+
+        const data = await response.json();
+        if (!mounted) {
+          return;
+        }
+
+        setAbout(data);
+        setAboutError('');
+      } catch {
+        if (!mounted) {
+          return;
+        }
+
+        setAboutError('Version info unavailable.');
+      }
+    };
+
+    void loadAbout();
 
     return () => {
       mounted = false;
@@ -1743,6 +1778,17 @@ function SettingsPage() {
   const addRpc = (list, setList) => {
     setList([...list, '']);
   };
+
+  const neomistVersion = about?.neomist?.version || (aboutError ? 'Unavailable' : 'Loading...');
+  const heliosVersion = about?.helios?.version || (aboutError ? 'Unavailable' : 'Loading...');
+  const kuboVersion = about?.kubo?.version || (aboutError ? 'Unavailable' : 'Loading...');
+  const kuboDetail = about?.kubo?.mode === 'external'
+    ? 'Using external IPFS instance'
+    : about?.kubo?.mode === 'managed'
+      ? 'Managed by NeoMist'
+      : aboutError
+        ? 'Could not load IPFS runtime info'
+        : 'Inspecting local IPFS runtime';
 
   return (
     <section className="mx-auto max-w-[920px]">
@@ -1904,6 +1950,43 @@ function SettingsPage() {
                 max="10080"
               />
               <span className="text-sm text-base-content/60">minutes (0 to disable)</span>
+            </div>
+          </div>
+        </div>
+
+        <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-6 p-5')}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <label className="block text-sm font-medium">About NeoMist</label>
+              <p className="mt-2 text-sm text-base-content/55">
+                Build and runtime versions for NeoMist and local stack.
+              </p>
+            </div>
+
+            {aboutError ? (
+              <span className="rounded-full border border-warning/30 bg-warning/12 px-3 py-1 text-xs font-medium text-warning">
+                {aboutError}
+              </span>
+            ) : null}
+          </div>
+
+          <div className="mt-5 grid gap-3 md:grid-cols-3">
+            <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">NeoMist</p>
+              <p className="mt-2 text-lg font-semibold tracking-tight">{neomistVersion}</p>
+              <p className="mt-2 text-sm text-base-content/55">Desktop app</p>
+            </div>
+
+            <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Helios</p>
+              <p className="mt-2 text-lg font-semibold tracking-tight">{heliosVersion}</p>
+              <p className="mt-2 text-sm text-base-content/55">Consensus light client</p>
+            </div>
+
+            <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Kubo</p>
+              <p className="mt-2 text-lg font-semibold tracking-tight">{kuboVersion}</p>
+              <p className="mt-2 text-sm text-base-content/55">{kuboDetail}</p>
             </div>
           </div>
         </div>

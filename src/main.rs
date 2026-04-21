@@ -287,6 +287,7 @@ fn init_services(
         helios_rpc_url: format!("http://{HELIOS_RPC_ADDR}"),
         ens_provider: Arc::new(ens_provider),
         http_client: http_client.clone(),
+        managed_ipfs: kubo_manager.is_managed(),
         ipfs_gateway_port,
         ipfs_api_url: "http://127.0.0.1:5001".to_string(),
         checkpoint_history,
