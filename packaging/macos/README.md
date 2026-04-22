@@ -10,7 +10,31 @@ Run on macOS:
 scripts/build-macos-pkg.sh
 ```
 
+Signing is opt-in. Build scripts only sign when `--sign` is passed.
+
+Standalone signed app bundle:
+
+```bash
+NEOMIST_APP_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/build-macos-app.sh --sign
+```
+
+Signed installer package:
+
+```bash
+NEOMIST_APP_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+NEOMIST_INSTALLER_SIGN_IDENTITY="Developer ID Installer: Your Name (TEAMID)" \
+scripts/build-macos-pkg.sh --sign
+```
+
+Notarize signed package:
+
+```bash
+NEOMIST_NOTARY_PROFILE="neomist-notary" scripts/notarize-macos-pkg.sh
+```
+
 `scripts/build-macos-pkg.sh` calls `scripts/build-macos-app.sh` internally. Keep `build-macos-app.sh` only if you want standalone `.app` output for local testing.
+
+All macOS build/notarization scripts load project `.env` automatically when present. Use `NEOMIST_ENV_FILE=/path/to/file` to override.
 
 Outputs:
 
@@ -44,5 +68,54 @@ Installer.app pages now include:
 
 Optional signing:
 
-- set `NEOMIST_INSTALLER_SIGN_IDENTITY` before running `scripts/build-macos-pkg.sh`
-- without signing identity, script builds unsigned `.pkg`
+- app signing uses `NEOMIST_APP_SIGN_IDENTITY` with `Developer ID Application`
+- pkg signing uses `NEOMIST_INSTALLER_SIGN_IDENTITY` with `Developer ID Installer`
+- signing happens only when `--sign` is passed to build script
+- if pkg signing is enabled, app must already be signed or `NEOMIST_APP_SIGN_IDENTITY` must be set too
+- optional entitlements file path: `NEOMIST_APP_ENTITLEMENTS`
+- default app signing enables hardened runtime and timestamp
+- without signing identities, scripts build unsigned artifacts
+
+Useful checks:
+
+```bash
+security find-identity -v -p basic
+codesign --verify --strict --verbose=2 dist/NeoMist.app
+pkgutil --check-signature dist/NeoMist-<version>-<arch>.pkg
+```
+
+## Notarization
+
+Recommended path:
+
+1. sign app with `Developer ID Application`
+2. sign pkg with `Developer ID Installer`
+3. notarize signed pkg with `xcrun notarytool`
+4. staple pkg ticket with `xcrun stapler`
+
+Store credentials once in macOS keychain:
+
+```bash
+xcrun notarytool store-credentials "neomist-notary" \
+  --apple-id "you@example.com" \
+  --team-id "TEAMID" \
+  --password "app-specific-password"
+```
+
+Then notarize built pkg:
+
+```bash
+NEOMIST_NOTARY_PROFILE="neomist-notary" scripts/notarize-macos-pkg.sh
+```
+
+Optional:
+
+- use `NEOMIST_NOTARY_KEYCHAIN` if profile stored in non-default keychain
+- use `NEOMIST_NOTARY_TIMEOUT` to change submit wait timeout
+
+Validation after notarization:
+
+```bash
+xcrun stapler validate dist/NeoMist-<version>-<arch>.pkg
+spctl -a -vv -t install dist/NeoMist-<version>-<arch>.pkg
+```

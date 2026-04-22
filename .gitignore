@@ -6,3 +6,4 @@ ui/.vite
 ui/dist
 ui/dist
 .DS_Store
+.env
