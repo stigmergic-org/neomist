@@ -202,11 +202,12 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
                 }
             }
             if show_gas_price != last_show_gas_price {
-                tray_icon.set_title(if show_gas_price {
-                    last_gas_price_label.as_deref()
+                if show_gas_price {
+                    tray_icon.set_title(last_gas_price_label.as_deref());
                 } else {
-                    None
-                });
+                    // `tray-icon` on macOS does not clear existing text on `None`.
+                    tray_icon.set_title(Some(""));
+                }
                 last_show_gas_price = show_gas_price;
             }
 
