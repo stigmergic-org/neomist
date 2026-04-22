@@ -1610,6 +1610,7 @@ function SettingsPage() {
   const [consensusRpcs, setConsensusRpcs] = useState(['']);
   const [executionRpcs, setExecutionRpcs] = useState(['']);
   const [followingInterval, setFollowingInterval] = useState(30);
+  const [showTrayGasPrice, setShowTrayGasPrice] = useState(true);
   const [loading, setLoading] = useState(true);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [initialConfig, setInitialConfig] = useState(null);
@@ -1637,11 +1638,13 @@ function SettingsPage() {
         const cons = Array.isArray(data.consensus_rpcs) && data.consensus_rpcs.length > 0 ? data.consensus_rpcs : ['https://ethereum.operationsolarstorm.org'];
         const execs = Array.isArray(data.execution_rpcs) && data.execution_rpcs.length > 0 ? data.execution_rpcs : ['https://eth.drpc.org'];
         const interval = typeof data.following_check_interval_mins === 'number' ? data.following_check_interval_mins : 30;
+        const trayGasPrice = typeof data.show_tray_gas_price === 'boolean' ? data.show_tray_gas_price : true;
 
         setConsensusRpcs(cons);
         setExecutionRpcs(execs);
         setFollowingInterval(interval);
-        setInitialConfig(JSON.stringify({ cons, execs, interval }));
+        setShowTrayGasPrice(trayGasPrice);
+        setInitialConfig(JSON.stringify({ cons, execs, interval, trayGasPrice }));
         setStatus({ type: '', message: '' });
       } catch {
         if (!mounted) {
@@ -1710,6 +1713,7 @@ function SettingsPage() {
       cons: consensusRpcs,
       execs: executionRpcs,
       interval: followingInterval,
+      trayGasPrice: showTrayGasPrice,
     });
 
     if (currentConfigStr === initialConfig) {
@@ -1735,6 +1739,7 @@ function SettingsPage() {
             consensus_rpcs: cleanConsensusRpcs,
             execution_rpcs: cleanExecRpcs,
             following_check_interval_mins: Number(followingInterval),
+            show_tray_gas_price: showTrayGasPrice,
           }),
         });
 
@@ -1762,7 +1767,7 @@ function SettingsPage() {
     }, 600);
 
     return () => clearTimeout(timer);
-  }, [consensusRpcs, executionRpcs, followingInterval, isInitialLoad]);
+  }, [consensusRpcs, executionRpcs, followingInterval, isInitialLoad, showTrayGasPrice]);
 
   const moveRpcUp = (index, list, setList) => {
     if (index === 0) return;
@@ -1994,6 +1999,36 @@ function SettingsPage() {
               />
               <span className="text-sm text-base-content/60">minutes (0 to disable)</span>
             </div>
+          </div>
+
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <label className="block text-sm font-medium">Tray Gas Price</label>
+                <p className="mt-2 max-w-2xl text-sm text-base-content/55">
+                  Show live gas price next to tray icon. Turning this off also stops background gas price requests.
+                </p>
+              </div>
+
+              <StatusPill tone={showTrayGasPrice ? 'success' : 'neutral'}>
+                {showTrayGasPrice ? 'Visible' : 'Hidden'}
+              </StatusPill>
+            </div>
+
+            <label className="mt-4 flex cursor-pointer items-center justify-between gap-4 rounded-2xl border border-base-300/60 bg-base-100/55 px-4 py-3">
+              <div>
+                <p className="text-sm font-medium">Show gas price in tray</p>
+                <p className="mt-1 text-sm text-base-content/55">
+                  Keep tray compact when disabled.
+                </p>
+              </div>
+              <input
+                className="toggle toggle-primary"
+                type="checkbox"
+                checked={showTrayGasPrice}
+                onChange={(event) => setShowTrayGasPrice(event.target.checked)}
+              />
+            </label>
           </div>
 
           <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>

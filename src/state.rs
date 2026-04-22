@@ -6,11 +6,13 @@ use alloy::providers::DynProvider;
 use tokio::sync::RwLock;
 
 use crate::config::AppConfig;
+use crate::tray::TrayState;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
     pub config_path: PathBuf,
+    pub tray_state: Arc<TrayState>,
     pub helios_rpc_url: String,
     pub ens_provider: Arc<DynProvider>,
     pub http_client: reqwest::Client,

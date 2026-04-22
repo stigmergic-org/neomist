@@ -329,6 +329,9 @@ async fn save_config_handler(
     new_config.dns_setup_attempted = config_guard.dns_setup_attempted;
     new_config.dns_setup_installed = config_guard.dns_setup_installed;
     
+    state
+        .tray_state
+        .set_show_gas_price(new_config.show_tray_gas_price);
     *config_guard = new_config.clone();
     match save_config(&state.config_path, &new_config) {
         Ok(_) => Json(SaveResponse {

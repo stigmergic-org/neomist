@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc::Receiver};
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,7 @@ pub struct TrayState {
     helios_client: Mutex<Option<Arc<EthereumClient>>>,
     kubo_manager: Mutex<Option<Arc<KuboManager>>>,
     runtime_handle: Mutex<Option<Handle>>,
+    show_gas_price: AtomicBool,
 }
 
 impl TrayState {
@@ -73,6 +75,7 @@ impl TrayState {
             helios_client: Mutex::new(None),
             kubo_manager: Mutex::new(None),
             runtime_handle: Mutex::new(None),
+            show_gas_price: AtomicBool::new(true),
         }
     }
 
@@ -92,6 +95,10 @@ impl TrayState {
         if let Ok(mut guard) = self.runtime_handle.lock() {
             *guard = Some(handle);
         }
+    }
+
+    pub fn set_show_gas_price(&self, show_gas_price: bool) {
+        self.show_gas_price.store(show_gas_price, Ordering::Relaxed);
     }
 
     fn helios_client(&self) -> Option<Arc<EthereumClient>> {
@@ -114,6 +121,10 @@ impl TrayState {
             .ok()
             .and_then(|guard| guard.as_ref().map(Handle::clone))
     }
+
+    pub fn show_gas_price(&self) -> bool {
+        self.show_gas_price.load(Ordering::Relaxed)
+    }
 }
 
 pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<()> {
@@ -126,9 +137,11 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let title_item = MenuItem::new("NeoMist", false, None);
     let separator_top = PredefinedMenuItem::separator();
     let dashboard_item = MenuItem::new("Dashboard", true, None);
+    let settings_item = MenuItem::new("Settings", true, None);
     let separator_mid = PredefinedMenuItem::separator();
     let explore_item = MenuItem::new("Explore IPFS", true, None);
     let p2p_item = MenuItem::new(ipfs_networking_menu_label(false), false, None);
+    let separator_settings = PredefinedMenuItem::separator();
     let separator_quit = PredefinedMenuItem::separator();
     let quit_item = MenuItem::new("Quit", true, None);
     menu.append(&title_item)
@@ -142,6 +155,10 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     menu.append(&explore_item)
         .wrap_err("Failed to add tray menu")?;
     menu.append(&p2p_item).wrap_err("Failed to add tray menu")?;
+    menu.append(&separator_settings)
+        .wrap_err("Failed to add tray menu")?;
+    menu.append(&settings_item)
+        .wrap_err("Failed to add tray menu")?;
     menu.append(&separator_quit)
         .wrap_err("Failed to add tray menu")?;
     menu.append(&quit_item)
@@ -160,6 +177,8 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
 
     let mut next_tick = Instant::now();
     let mut last_networking_enabled: Option<bool> = None;
+    let mut last_show_gas_price = tray_state.show_gas_price();
+    let mut last_gas_price_label: Option<String> = None;
     event_loop.run(move |_event, _target, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::WaitUntil(next_tick);
 
@@ -171,12 +190,24 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
         if now >= next_tick {
             next_tick = now + Duration::from_millis(250);
 
+            let show_gas_price = tray_state.show_gas_price();
             let mut latest_label = None;
             while let Ok(label) = gas_rx.try_recv() {
                 latest_label = Some(label);
             }
             if let Some(label) = latest_label {
-                tray_icon.set_title(Some(label));
+                last_gas_price_label = Some(label);
+                if show_gas_price {
+                    tray_icon.set_title(last_gas_price_label.as_deref());
+                }
+            }
+            if show_gas_price != last_show_gas_price {
+                tray_icon.set_title(if show_gas_price {
+                    last_gas_price_label.as_deref()
+                } else {
+                    None
+                });
+                last_show_gas_price = show_gas_price;
             }
 
             refresh_p2p_menu(&tray_state, &p2p_item);
@@ -200,6 +231,8 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
         if let Ok(event) = menu_events.try_recv() {
             if event.id == dashboard_item.id() {
                 open_url("https://neomist.localhost");
+            } else if event.id == settings_item.id() {
+                open_url("https://neomist.localhost/settings");
             } else if event.id == explore_item.id() {
                 open_url("https://ipfs.localhost/webui");
             } else if event.id == p2p_item.id() {

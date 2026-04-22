@@ -16,6 +16,10 @@ fn default_execution_rpcs() -> Vec<String> {
     vec!["https://eth.drpc.org".to_string()]
 }
 
+fn default_show_tray_gas_price() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_consensus_rpcs")]
@@ -24,6 +28,8 @@ pub struct AppConfig {
     pub execution_rpcs: Vec<String>,
     #[serde(default = "default_following_interval")]
     pub following_check_interval_mins: u64,
+    #[serde(default = "default_show_tray_gas_price")]
+    pub show_tray_gas_price: bool,
     #[serde(default)]
     pub dns_setup_attempted: bool,
     #[serde(default)]
@@ -87,6 +93,7 @@ fn default_config() -> AppConfig {
         consensus_rpcs: default_consensus_rpcs(),
         execution_rpcs: default_execution_rpcs(),
         following_check_interval_mins: default_following_interval(),
+        show_tray_gas_price: default_show_tray_gas_price(),
         dns_setup_attempted: false,
         dns_setup_installed: false,
     }

@@ -257,6 +257,7 @@ fn init_services(
     info!("Data dir: {}", data_dir.display());
     let config = load_or_create_config(&config_path)?;
     let config = app_setup::prepare_runtime_setup(config, &config_path, &data_dir)?;
+    tray_state.set_show_gas_price(config.show_tray_gas_price);
     info!("Consensus RPCs: {:?}", config.consensus_rpcs);
     info!("Execution RPCs: {:?}", config.execution_rpcs);
     let data_dir_for_helios = data_dir.clone();
@@ -284,6 +285,7 @@ fn init_services(
     let state = AppState {
         config: Arc::new(tokio::sync::RwLock::new(config.clone())),
         config_path: config_path.clone(),
+        tray_state: tray_state.clone(),
         helios_rpc_url: format!("http://{HELIOS_RPC_ADDR}"),
         ens_provider: Arc::new(ens_provider),
         http_client: http_client.clone(),

@@ -1,5 +1,5 @@
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy_primitives::U256;
 use eyre::{Result, WrapErr};
@@ -13,11 +13,28 @@ pub async fn poll_gas_price(
     state: AppState,
     tx: Sender<String>,
 ) {
-    let mut ticker = interval(Duration::from_secs(15));
+    let mut ticker = interval(Duration::from_millis(250));
+    let mut last_visible = state.tray_state.show_gas_price();
+    let mut last_poll = Instant::now();
+    let mut first_poll = true;
     info!("Gas price polling started");
 
     loop {
         ticker.tick().await;
+
+        let visible = state.tray_state.show_gas_price();
+        if !visible {
+            last_visible = false;
+            continue;
+        }
+
+        if !first_poll && last_visible && last_poll.elapsed() < Duration::from_secs(15) {
+            continue;
+        }
+
+        first_poll = false;
+        last_visible = true;
+        last_poll = Instant::now();
 
         let execution_rpcs = {
             let config = state.config.read().await;
