@@ -5,7 +5,8 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use eyre::{Result, WrapErr};
+use directories::BaseDirs;
+use eyre::{ContextCompat, Result, WrapErr};
 use tracing::info;
 
 use crate::certs::CertManager;
@@ -15,6 +16,8 @@ use crate::dns;
 const APPLICATIONS_DIR: &str = "/Applications";
 const CLI_LINK_PATH: &str = "/usr/local/bin/neomist";
 const NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV: &str = "NEOMIST_SKIP_SYSTEM_CERT_TRUST";
+const START_ON_LOGIN_LABEL: &str = "org.neomist.app";
+const LINUX_AUTOSTART_FILE_NAME: &str = "neomist.desktop";
 
 pub fn prepare_runtime_setup(
     mut config: AppConfig,
@@ -150,6 +153,14 @@ pub fn install_system_for_current_exe() -> Result<()> {
     Ok(())
 }
 
+pub fn sync_start_on_login(enabled: bool) -> Result<()> {
+    match std::env::consts::OS {
+        "macos" => sync_start_on_login_macos(enabled),
+        "linux" => sync_start_on_login_linux(enabled),
+        other => Err(eyre::eyre!("Start on login is not supported on {other}")),
+    }
+}
+
 fn ensure_local_cert_files(data_dir: &Path) -> Result<()> {
     CertManager::new(data_dir)
         .ensure_certs()
@@ -268,6 +279,141 @@ fn maybe_install_dns(mut config: AppConfig, config_path: &Path) -> Result<AppCon
     config.dns_setup_installed = true;
     save_config(config_path, &config)?;
     Ok(config)
+}
+
+fn sync_start_on_login_macos(enabled: bool) -> Result<()> {
+    let launch_agent_path = macos_launch_agent_path()?;
+    if !enabled {
+        return remove_file_if_exists(&launch_agent_path);
+    }
+
+    let bundle_path = current_app_bundle()?.ok_or_else(|| {
+        eyre::eyre!("Start on login on macOS requires running NeoMist.app from /Applications")
+    })?;
+    if !bundle_path.starts_with(APPLICATIONS_DIR) {
+        return Err(eyre::eyre!(
+            "Start on login on macOS requires running NeoMist.app from /Applications"
+        ));
+    }
+
+    if let Some(parent) = launch_agent_path.parent() {
+        fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("Failed to create {}", parent.display()))?;
+    }
+
+    fs::write(&launch_agent_path, macos_launch_agent_contents(&bundle_path)).wrap_err_with(|| {
+        format!(
+            "Failed to write macOS launch agent at {}",
+            launch_agent_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sync_start_on_login_linux(enabled: bool) -> Result<()> {
+    let autostart_path = linux_autostart_path()?;
+    if !enabled {
+        return remove_file_if_exists(&autostart_path);
+    }
+
+    let exe_path = current_exe_path()?;
+    if let Some(parent) = autostart_path.parent() {
+        fs::create_dir_all(parent)
+            .wrap_err_with(|| format!("Failed to create {}", parent.display()))?;
+    }
+
+    fs::write(&autostart_path, linux_autostart_contents(&exe_path)).wrap_err_with(|| {
+        format!(
+            "Failed to write Linux autostart entry at {}",
+            autostart_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn macos_launch_agent_path() -> Result<PathBuf> {
+    Ok(user_home_dir()?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{START_ON_LOGIN_LABEL}.plist")))
+}
+
+fn linux_autostart_path() -> Result<PathBuf> {
+    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
+    Ok(base
+        .config_dir()
+        .join("autostart")
+        .join(LINUX_AUTOSTART_FILE_NAME))
+}
+
+fn user_home_dir() -> Result<PathBuf> {
+    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
+    Ok(base.home_dir().to_path_buf())
+}
+
+fn macos_launch_agent_contents(bundle_path: &Path) -> String {
+    let bundle_path = xml_escape(&bundle_path.to_string_lossy());
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{START_ON_LOGIN_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>{bundle_path}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn linux_autostart_contents(exe_path: &Path) -> String {
+    let exec = desktop_entry_quote(&exe_path.to_string_lossy());
+    format!(
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=NeoMist\nComment=Launch NeoMist at login\nExec={exec}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+    )
+}
+
+fn desktop_entry_quote(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' | '"' | '$' | '`' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            '%' => escaped.push_str("%%"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).wrap_err_with(|| format!("Failed to remove {}", path.display())),
+    }
 }
 
 fn current_exe_path() -> Result<PathBuf> {

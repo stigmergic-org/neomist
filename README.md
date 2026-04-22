@@ -91,6 +91,7 @@ The settings UI currently manages:
 - consensus RPC fallback order
 - execution RPC fallback order
 - background follow interval in minutes
+- start NeoMist automatically at login
 
 Default endpoints in the current codebase are:
 

@@ -23,6 +23,7 @@ use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{error, info, warn};
 
+use crate::app_setup;
 use crate::cache;
 use crate::certs::CertManager;
 use crate::config::{AppConfig, save_config};
@@ -323,23 +324,46 @@ async fn save_config_handler(
         return response;
     }
 
-    let mut config_guard = state.config.write().await;
-    
-    // Preserve internal state flags from the current config
-    new_config.dns_setup_attempted = config_guard.dns_setup_attempted;
-    new_config.dns_setup_installed = config_guard.dns_setup_installed;
-    
-    state
-        .tray_state
-        .set_show_gas_price(new_config.show_tray_gas_price);
-    *config_guard = new_config.clone();
+    let current_config = state.config.read().await.clone();
+
+    // Preserve internal state flags from current config.
+    new_config.dns_setup_attempted = current_config.dns_setup_attempted;
+    new_config.dns_setup_installed = current_config.dns_setup_installed;
+
+    let start_on_login_changed = new_config.start_on_login != current_config.start_on_login;
+    if start_on_login_changed {
+        if let Err(err) = app_setup::sync_start_on_login(new_config.start_on_login) {
+            error!("Failed to update start-on-login setting: {err}");
+            return Json(SaveResponse {
+                success: false,
+                error: Some(err.to_string()),
+            })
+            .into_response();
+        }
+    }
+
     match save_config(&state.config_path, &new_config) {
-        Ok(_) => Json(SaveResponse {
-            success: true,
-            error: None,
-        })
-        .into_response(),
+        Ok(_) => {
+            state
+                .tray_state
+                .set_show_gas_price(new_config.show_tray_gas_price);
+            let mut config_guard = state.config.write().await;
+            *config_guard = new_config.clone();
+            Json(SaveResponse {
+                success: true,
+                error: None,
+            })
+            .into_response()
+        }
         Err(err) => {
+            if start_on_login_changed {
+                if let Err(revert_err) = app_setup::sync_start_on_login(current_config.start_on_login)
+                {
+                    error!(
+                        "Failed to revert start-on-login setting after config save failure: {revert_err}"
+                    );
+                }
+            }
             error!("Failed to save config: {err}");
             Json(SaveResponse {
                 success: false,

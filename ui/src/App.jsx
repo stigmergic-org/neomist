@@ -1752,6 +1752,7 @@ function SettingsPage() {
   const [executionRpcs, setExecutionRpcs] = useState(['']);
   const [followingInterval, setFollowingInterval] = useState(30);
   const [showTrayGasPrice, setShowTrayGasPrice] = useState(true);
+  const [startOnLogin, setStartOnLogin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [initialConfig, setInitialConfig] = useState(null);
@@ -1780,12 +1781,14 @@ function SettingsPage() {
         const execs = Array.isArray(data.execution_rpcs) && data.execution_rpcs.length > 0 ? data.execution_rpcs : ['https://eth.drpc.org'];
         const interval = typeof data.following_check_interval_mins === 'number' ? data.following_check_interval_mins : 30;
         const trayGasPrice = typeof data.show_tray_gas_price === 'boolean' ? data.show_tray_gas_price : true;
+        const startOnLoginEnabled = typeof data.start_on_login === 'boolean' ? data.start_on_login : false;
 
         setConsensusRpcs(cons);
         setExecutionRpcs(execs);
         setFollowingInterval(interval);
         setShowTrayGasPrice(trayGasPrice);
-        setInitialConfig(JSON.stringify({ cons, execs, interval, trayGasPrice }));
+        setStartOnLogin(startOnLoginEnabled);
+        setInitialConfig(JSON.stringify({ cons, execs, interval, trayGasPrice, startOnLogin: startOnLoginEnabled }));
         setStatus({ type: '', message: '' });
       } catch {
         if (!mounted) {
@@ -1855,6 +1858,7 @@ function SettingsPage() {
       execs: executionRpcs,
       interval: followingInterval,
       trayGasPrice: showTrayGasPrice,
+      startOnLogin,
     });
 
     if (currentConfigStr === initialConfig) {
@@ -1881,6 +1885,7 @@ function SettingsPage() {
             execution_rpcs: cleanExecRpcs,
             following_check_interval_mins: Number(followingInterval),
             show_tray_gas_price: showTrayGasPrice,
+            start_on_login: startOnLogin,
           }),
         });
 
@@ -1908,7 +1913,7 @@ function SettingsPage() {
     }, 600);
 
     return () => clearTimeout(timer);
-  }, [consensusRpcs, executionRpcs, followingInterval, isInitialLoad, showTrayGasPrice]);
+  }, [consensusRpcs, executionRpcs, followingInterval, isInitialLoad, showTrayGasPrice, startOnLogin]);
 
   const moveRpcUp = (index, list, setList) => {
     if (index === 0) return;
@@ -1944,7 +1949,6 @@ function SettingsPage() {
       : aboutError
         ? 'Could not load IPFS runtime info'
         : 'Inspecting local IPFS runtime';
-
   const copyLocalRpcUrl = async () => {
     try {
       if (navigator.clipboard?.writeText) {
@@ -2125,51 +2129,56 @@ function SettingsPage() {
           </div>
 
           <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <label className="mb-2 block text-sm font-medium">Following Check Interval</label>
-            <p className="mt-3 text-sm text-base-content/55">
-              How often the background worker checks your followed domains for updates.
-            </p>
-            <div className="flex items-center gap-3">
-              <input
-                className={classNames(INPUT_CLASS, 'w-32')}
-                value={followingInterval}
-                onChange={(event) => setFollowingInterval(event.target.value)}
-                type="number"
-                min="0"
-                max="10080"
-              />
-              <span className="text-sm text-base-content/60">minutes (0 to disable)</span>
-            </div>
-          </div>
-
-          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
               <div>
-                <label className="block text-sm font-medium">Tray Gas Price</label>
-                <p className="mt-2 max-w-2xl text-sm text-base-content/55">
-                  Show live gas price next to tray icon. Turning this off also stops background gas price requests.
-                </p>
+                <label className="block text-sm font-medium">App Behavior</label>
               </div>
-
-              <StatusPill tone={showTrayGasPrice ? 'success' : 'neutral'}>
-                {showTrayGasPrice ? 'Visible' : 'Hidden'}
-              </StatusPill>
             </div>
 
-            <label className="mt-4 flex cursor-pointer items-center justify-between gap-4 rounded-2xl border border-base-300/60 bg-base-100/55 px-4 py-3">
-              <div>
-                <p className="text-sm font-medium">Show gas price in tray</p>
-                <p className="mt-1 text-sm text-base-content/55">
-                  Keep tray compact when disabled.
-                </p>
+            <div className="mt-4 overflow-hidden rounded-2xl border border-base-300/60 bg-base-100/55">
+              <div className="flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Follow checks</p>
+                  <p className="mt-1 text-xs text-base-content/50">How often to check followed apps for updates, 0 disables</p>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <input
+                    className="h-12 w-28 rounded-xl border border-base-300 bg-base-100/85 px-3 text-sm outline-none transition focus:border-primary/45 focus:bg-base-100"
+                    value={followingInterval}
+                    onChange={(event) => setFollowingInterval(event.target.value)}
+                    type="number"
+                    min="0"
+                    max="10080"
+                  />
+                  <span className="text-sm text-base-content/60">minutes</span>
+                </div>
               </div>
-              <input
-                className="toggle toggle-primary"
-                type="checkbox"
-                checked={showTrayGasPrice}
-                onChange={(event) => setShowTrayGasPrice(event.target.checked)}
-              />
-            </label>
+
+              <label className="flex cursor-pointer flex-col gap-3 border-t border-base-300/60 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Tray gas price</p>
+                </div>
+                <input
+                  className="toggle toggle-primary"
+                  type="checkbox"
+                  checked={showTrayGasPrice}
+                  onChange={(event) => setShowTrayGasPrice(event.target.checked)}
+                />
+              </label>
+
+              <label className="flex cursor-pointer flex-col gap-3 border-t border-base-300/60 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">Start on login</p>
+                </div>
+                <input
+                  className="toggle toggle-primary"
+                  type="checkbox"
+                  checked={startOnLogin}
+                  onChange={(event) => setStartOnLogin(event.target.checked)}
+                />
+              </label>
+            </div>
           </div>
 
           <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>

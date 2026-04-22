@@ -31,6 +31,8 @@ pub struct AppConfig {
     #[serde(default = "default_show_tray_gas_price")]
     pub show_tray_gas_price: bool,
     #[serde(default)]
+    pub start_on_login: bool,
+    #[serde(default)]
     pub dns_setup_attempted: bool,
     #[serde(default)]
     pub dns_setup_installed: bool,
@@ -94,6 +96,7 @@ fn default_config() -> AppConfig {
         execution_rpcs: default_execution_rpcs(),
         following_check_interval_mins: default_following_interval(),
         show_tray_gas_price: default_show_tray_gas_price(),
+        start_on_login: false,
         dns_setup_attempted: false,
         dns_setup_installed: false,
     }
