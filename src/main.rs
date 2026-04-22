@@ -352,6 +352,16 @@ fn init_services(
         }
     });
 
+    info!("Init: announcing NeoMist node marker");
+    handle.spawn({
+        let state = state.clone();
+        async move {
+            if let Err(err) = ipfs::announce_node_provider_once(&state).await {
+                warn!("NeoMist node marker announce failed: {err}");
+            }
+        }
+    });
+
     let (sync_tx, sync_rx) = tokio::sync::mpsc::channel(1);
 
     info!("Init: starting Helios sync monitor");

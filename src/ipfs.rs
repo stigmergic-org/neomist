@@ -11,13 +11,24 @@ use std::time::Duration;
 use eyre::{Result, WrapErr};
 use flate2::read::GzDecoder;
 use hex::encode as hex_encode;
+use reqwest::multipart;
 use sha2::{Digest, Sha512};
 use tar::Archive;
+use url::form_urlencoded;
+
+use crate::state::AppState;
 
 const KUBO_VERSION: &str = "v0.40.1";
 const IPFS_API_PORT: u16 = 5001;
 const MANAGED_GATEWAY_PORT: u16 = 58080;
 const KUBO_DIST_BASE: &str = "https://dist.ipfs.tech/kubo";
+const NEOMIST_NODE_MARKER: &str = "neomist-node";
+
+#[derive(Debug, serde::Deserialize)]
+struct BlockPutResponse {
+    #[serde(rename = "Key")]
+    key: String,
+}
 
 pub struct KuboManager {
     gateway_port: u16,
@@ -82,6 +93,77 @@ impl KuboManager {
 
 pub fn bundled_kubo_version() -> &'static str {
     KUBO_VERSION
+}
+
+pub async fn announce_node_provider_once(state: &AppState) -> Result<String> {
+    announce_node_provider(state).await
+}
+
+pub async fn announce_provider(state: &AppState, cid: &str) -> Result<()> {
+    let response = state
+        .http_client
+        .post(format!(
+            "{}/api/v0/routing/provide?arg={}",
+            state.ipfs_api_url,
+            encode_arg(cid)
+        ))
+        .send()
+        .await
+        .wrap_err("Failed to announce provider record")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(eyre::eyre!(
+            "Provider announce failed (status {}): {}",
+            status,
+            body
+        ));
+    }
+
+    Ok(())
+}
+
+async fn announce_node_provider(state: &AppState) -> Result<String> {
+    let cid = ensure_node_marker_block(state).await?;
+    announce_provider(state, &cid).await?;
+    Ok(cid)
+}
+
+async fn ensure_node_marker_block(state: &AppState) -> Result<String> {
+    let response = state
+        .http_client
+        .post(format!(
+            "{}/api/v0/block/put?cid-codec=raw&mhtype=identity&pin=true",
+            state.ipfs_api_url
+        ))
+        .multipart(
+            multipart::Form::new().part(
+                "data",
+                multipart::Part::bytes(NEOMIST_NODE_MARKER.as_bytes().to_vec())
+                    .file_name("neomist-node"),
+            ),
+        )
+        .send()
+        .await
+        .wrap_err("Failed to write NeoMist node marker block")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(eyre::eyre!(
+            "NeoMist node marker block put failed (status {}): {}",
+            status,
+            body
+        ));
+    }
+
+    let body: BlockPutResponse = response
+        .json()
+        .await
+        .wrap_err("Failed to decode NeoMist node marker response")?;
+
+    Ok(body.key)
 }
 
 pub async fn init_kubo(http_client: reqwest::Client, base_dir: PathBuf) -> Result<KuboManager> {
@@ -322,6 +404,10 @@ fn installed_kubo_version(ipfs_path: &Path) -> Result<Option<String>> {
 
 fn normalized_kubo_version(version: &str) -> &str {
     version.trim().trim_start_matches('v')
+}
+
+fn encode_arg(value: &str) -> String {
+    form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn ensure_repo_initialized(ipfs_path: &Path, repo_dir: &Path) -> Result<()> {

@@ -4,6 +4,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 const STARTER_DOMAINS = ['zfi.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth', 'evmnow.eth'];
 const CHECKPOINT_REFRESH_MS = 60000;
 const SEEDING_REFRESH_MS = 30000;
+const PROVIDER_REFRESH_MS = 60000;
+const DELEGATED_ROUTING_PROVIDERS_BASE = 'https://delegated-ipfs.dev/routing/v1/providers';
+const NEOMIST_NODE_MARKER_CID = 'bafkqaddomvxw22ltoqww433emu';
 const RECENT_STORAGE_KEY = 'neomist.recent-domains';
 const MAX_RECENT_DOMAINS = 8;
 const CHECKPOINT_ICON_SIZE = 32;
@@ -458,6 +461,113 @@ function useSeedingData() {
     error,
     reload: () => load(false),
   };
+}
+
+function useNodeProviderStats() {
+  const [count, setCount] = useState(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        const nextCount = await fetchDelegatedProviderCount(NEOMIST_NODE_MARKER_CID);
+        if (!mounted) {
+          return;
+        }
+
+        setCount(nextCount);
+      } catch {
+        if (!mounted) {
+          return;
+        }
+
+        setCount(null);
+      }
+    };
+
+    void load();
+    const interval = window.setInterval(() => {
+      void load();
+    }, PROVIDER_REFRESH_MS);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  return count;
+}
+
+function useProviderCounts(cids) {
+  const [counts, setCounts] = useState({});
+  const normalizedCids = useMemo(
+    () =>
+      [...new Set(cids.filter((cid) => typeof cid === 'string' && cid.length > 0))],
+    [cids]
+  );
+
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      if (normalizedCids.length === 0) {
+        if (mounted) {
+          setCounts({});
+        }
+        return;
+      }
+
+      try {
+        const entries = await Promise.all(
+          normalizedCids.map(async (cid) => [cid, await fetchDelegatedProviderCount(cid)])
+        );
+        if (!mounted) {
+          return;
+        }
+
+        setCounts(Object.fromEntries(entries));
+      } catch {
+        if (!mounted) {
+          return;
+        }
+
+        setCounts({});
+      }
+    };
+
+    void load();
+    const interval = window.setInterval(() => {
+      void load();
+    }, PROVIDER_REFRESH_MS);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, [normalizedCids]);
+
+  return counts;
+}
+
+async function fetchDelegatedProviderCount(cid) {
+  const response = await fetch(`${DELEGATED_ROUTING_PROVIDERS_BASE}/${encodeURIComponent(cid)}`);
+  if (!response.ok) {
+    throw new Error('Failed to load delegated routing providers');
+  }
+
+  const data = await response.json();
+  const providers = Array.isArray(data?.Providers) ? data.Providers : [];
+  return new Set(
+    providers
+      .map((provider) => (typeof provider?.ID === 'string' ? provider.ID : ''))
+      .filter(Boolean)
+  ).size;
+}
+
+function formatProviderCount(value) {
+  return typeof value === 'number' ? String(value) : '-';
 }
 
 function App() {
@@ -1154,6 +1264,7 @@ function SeedingPage({
   const [filter, setFilter] = useState('all');
   const [actionKey, setActionKey] = useState('');
   const [actionError, setActionError] = useState('');
+  const nodeProviderCount = useNodeProviderStats();
 
   const selectedDomain = useMemo(
     () => domains.find((domain) => domain.domain === routeDomain) || null,
@@ -1193,6 +1304,16 @@ function SeedingPage({
 
   const detailDomain = routeDomain ? selectedDomain : filteredDomains[0] || null;
   const selectedMissing = Boolean(routeDomain) && !selectedDomain && !loading;
+  const providerCids = useMemo(
+    () => [
+      ...new Set([
+        ...domains.map((domain) => domain?.versions?.[0]?.cid),
+        ...(detailDomain?.versions?.map((version) => version?.cid) || []),
+      ].filter((cid) => typeof cid === 'string' && cid.length > 0)),
+    ],
+    [detailDomain, domains]
+  );
+  const providerCounts = useProviderCounts(providerCids);
 
   const filters = [
     { id: 'all', label: 'All' },
@@ -1274,7 +1395,7 @@ function SeedingPage({
 
   return (
     <section className="grid gap-6">
-      <div>
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-4xl font-semibold tracking-tight">Seeding</h1>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-base-content/65">
@@ -1282,9 +1403,20 @@ function SeedingPage({
             follow the latest dapp versions.
           </p>
         </div>
+
+        <div className={classNames(SUBTLE_PANEL_CLASS, 'shrink-0 px-4 py-3')}>
+          <p className="flex items-center gap-3 whitespace-nowrap leading-none">
+            <span className="text-2xl font-semibold tracking-tight leading-none">
+              {formatProviderCount(nodeProviderCount)}
+            </span>
+            <span className="text-[11px] font-medium uppercase tracking-[0.22em] text-base-content/45 leading-none">
+              neomist nodes
+            </span>
+          </p>
+        </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="Sites" value={summary.total} />
         <MetricTile label="Following" value={summary.following} />
         <MetricTile label="Partial" value={summary.partial} />
@@ -1337,6 +1469,8 @@ function SeedingPage({
                 {filteredDomains.map((domain) => {
                   const coverage = getCoverage(domain.local_size, domain.full_size);
                   const active = detailDomain?.domain === domain.domain;
+                  const latestCid = domain.versions?.[0]?.cid || '';
+                  const latestProviderCount = latestCid ? providerCounts[latestCid] : null;
 
                   return (
                     <button
@@ -1376,7 +1510,7 @@ function SeedingPage({
                       </div>
 
                       <div className="mt-4 flex items-center justify-between gap-4 text-xs text-base-content/55">
-                        <span>{formatBytes(domain.local_size)} stored</span>
+                        <span>{formatProviderCount(latestProviderCount)} seeders</span>
                         <span>{domain.versions?.length || 0} snapshots</span>
                       </div>
                     </button>
@@ -1392,6 +1526,7 @@ function SeedingPage({
           routeDomain={routeDomain}
           selectedMissing={selectedMissing}
           actionKey={actionKey}
+          providerCounts={providerCounts}
           rememberRecentTarget={rememberRecentTarget}
           onToggleLatestTracking={toggleLatestTracking}
           onClearDomain={clearDomainCache}
@@ -1407,6 +1542,7 @@ function DomainDetailPanel({
   routeDomain,
   selectedMissing,
   actionKey,
+  providerCounts,
   rememberRecentTarget,
   onToggleLatestTracking,
   onClearDomain,
@@ -1483,7 +1619,7 @@ function DomainDetailPanel({
         </div>
       </div>
 
-      <div className="mt-6 grid grid-cols-4 gap-4">
+      <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="Snapshots" value={detailDomain.versions?.length || 0} />
         <MetricTile label="Last cached" value={formatTimestamp(detailDomain.cached_at)} />
         <MetricTile label="Stored" value={formatBytes(detailDomain.local_size)} />
@@ -1526,6 +1662,7 @@ function DomainDetailPanel({
           {Array.isArray(detailDomain.versions) && detailDomain.versions.length > 0 ? (
             detailDomain.versions.map((version, index) => {
               const versionCoverage = getCoverage(version.local_size, version.full_size);
+              const versionProviderCount = providerCounts[version.cid];
 
               return (
                 <article key={`${detailDomain.domain}:${version.timestamp}:${version.cid}`} className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
@@ -1572,25 +1709,29 @@ function DomainDetailPanel({
                     </div>
                   </div>
 
-                  <div className="mt-5 grid grid-cols-[minmax(0,1fr)_220px] gap-5">
+                  <div className="mt-5 grid grid-cols-[minmax(0,1fr)_320px] gap-5">
                     <div>
                       <div className="flex items-center justify-between gap-4 text-sm">
                         <span className="font-medium">Coverage</span>
                         <span className="text-base-content/60">{versionCoverage.detail}</span>
                       </div>
-                      <div className="mt-3">
-                        <ProgressBar ratio={versionCoverage.ratio} tone={versionCoverage.tone} />
+                      <div className="mt-2">
+                        <ProgressBar ratio={versionCoverage.ratio} tone={versionCoverage.tone} size="sm" />
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                    <div className="grid grid-cols-3 gap-3 text-sm">
+                      <div className="min-w-0 rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
                         <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Stored</p>
                         <p className="mt-2 font-medium">{formatBytes(version.local_size)}</p>
                       </div>
-                      <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                      <div className="min-w-0 rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
                         <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Total</p>
                         <p className="mt-2 font-medium">{formatBytes(version.full_size)}</p>
+                      </div>
+                      <div className="min-w-0 rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Seeders</p>
+                        <p className="mt-2 font-medium">{formatProviderCount(versionProviderCount)}</p>
                       </div>
                     </div>
                   </div>
@@ -2163,7 +2304,7 @@ function StatusPill({ tone = 'neutral', children }) {
   );
 }
 
-function ProgressBar({ ratio, tone = 'neutral' }) {
+function ProgressBar({ ratio, tone = 'neutral', size = 'md' }) {
   const styles = {
     neutral: 'bg-base-content/20',
     success: 'bg-success',
@@ -2171,8 +2312,10 @@ function ProgressBar({ ratio, tone = 'neutral' }) {
     info: 'bg-info',
   };
 
+  const sizeClass = size === 'sm' ? 'h-1.5' : 'h-2';
+
   return (
-    <div className="h-2 overflow-hidden rounded-full bg-base-200/80">
+    <div className={classNames(sizeClass, 'overflow-hidden rounded-full bg-base-200/80')}>
       <div
         className={classNames('h-full rounded-full transition-all', styles[tone] || styles.neutral)}
         style={{ width: `${Math.max(0, Math.min(ratio, 1)) * 100}%` }}
