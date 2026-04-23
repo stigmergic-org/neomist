@@ -135,6 +135,8 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let icon_inactive = load_tray_icon(ICON_INACTIVE)?;
     let menu = Menu::new();
     let title_item = MenuItem::new("NeoMist", false, None);
+    let gas_price_item = MenuItem::new(&gas_price_menu_label(None), false, None);
+    let gas_price_separator = PredefinedMenuItem::separator();
     let separator_top = PredefinedMenuItem::separator();
     let dashboard_item = MenuItem::new("Dashboard", true, None);
     let settings_item = MenuItem::new("Settings", true, None);
@@ -166,7 +168,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
 
     let tray_icon = TrayIconBuilder::new()
         .with_icon(icon_inactive.clone())
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu.clone()))
         .with_icon_as_template(false)
         .build()
         .wrap_err("Failed to create tray icon")?;
@@ -179,6 +181,15 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let mut last_networking_enabled: Option<bool> = None;
     let mut last_show_gas_price = tray_state.show_gas_price();
     let mut last_gas_price_label: Option<String> = None;
+    let mut linux_gas_menu_visible = false;
+    sync_linux_gas_price_menu(
+        &menu,
+        &gas_price_item,
+        &gas_price_separator,
+        last_show_gas_price,
+        last_gas_price_label.as_deref(),
+        &mut linux_gas_menu_visible,
+    );
     event_loop.run(move |_event, _target, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::WaitUntil(next_tick);
 
@@ -195,13 +206,15 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
             while let Ok(label) = gas_rx.try_recv() {
                 latest_label = Some(label);
             }
+            let gas_price_changed = latest_label.is_some();
+            let gas_price_visibility_changed = show_gas_price != last_show_gas_price;
             if let Some(label) = latest_label {
                 last_gas_price_label = Some(label);
                 if show_gas_price {
                     tray_icon.set_title(last_gas_price_label.as_deref());
                 }
             }
-            if show_gas_price != last_show_gas_price {
+            if gas_price_visibility_changed {
                 if show_gas_price {
                     tray_icon.set_title(last_gas_price_label.as_deref());
                 } else {
@@ -209,6 +222,16 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
                     tray_icon.set_title(Some(""));
                 }
                 last_show_gas_price = show_gas_price;
+            }
+            if gas_price_changed || gas_price_visibility_changed {
+                sync_linux_gas_price_menu(
+                    &menu,
+                    &gas_price_item,
+                    &gas_price_separator,
+                    show_gas_price,
+                    last_gas_price_label.as_deref(),
+                    &mut linux_gas_menu_visible,
+                );
             }
 
             refresh_p2p_menu(&tray_state, &p2p_item);
@@ -419,4 +442,44 @@ fn refresh_p2p_menu(tray_state: &TrayState, p2p_item: &MenuItem) {
 
 fn refresh_explore_menu(networking_enabled: bool, explore_item: &MenuItem) {
     explore_item.set_enabled(networking_enabled);
+}
+
+fn gas_price_menu_label(label: Option<&str>) -> String {
+    match label {
+        Some(label) => format!("Gas price: {label}"),
+        None => "Gas price: updating...".to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_linux_gas_price_menu(
+    menu: &Menu,
+    gas_price_item: &MenuItem,
+    gas_price_separator: &PredefinedMenuItem,
+    show_gas_price: bool,
+    gas_price_label: Option<&str>,
+    visible: &mut bool,
+) {
+    gas_price_item.set_text(gas_price_menu_label(gas_price_label));
+
+    if show_gas_price && !*visible {
+        let _ = menu.insert(gas_price_item, 1);
+        let _ = menu.insert(gas_price_separator, 2);
+        *visible = true;
+    } else if !show_gas_price && *visible {
+        let _ = menu.remove(gas_price_item);
+        let _ = menu.remove(gas_price_separator);
+        *visible = false;
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_linux_gas_price_menu(
+    _menu: &Menu,
+    _gas_price_item: &MenuItem,
+    _gas_price_separator: &PredefinedMenuItem,
+    _show_gas_price: bool,
+    _gas_price_label: Option<&str>,
+    _visible: &mut bool,
+) {
 }
