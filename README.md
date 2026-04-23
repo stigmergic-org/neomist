@@ -38,7 +38,8 @@ NeoMist is a local-first desktop app for browsing `.eth` and `.wei` sites withou
 - Rust toolchain with Cargo
 - Node.js and npm for the embedded UI build
 - A desktop session capable of running a tray app
-- On Linux: `systemd-resolved`, `pkexec`, and `update-ca-certificates`
+- On Ubuntu/Kubuntu for builds: `pkg-config`, `libglib2.0-dev`, `libgtk-3-dev`, and `libayatana-appindicator3-dev`
+- On Linux: `systemd-resolved`, `pkexec`, `update-ca-certificates`, and `libcap2-bin`
 
 ## Running Locally
 
@@ -50,6 +51,7 @@ Notes:
 
 - The Rust build automatically rebuilds the UI from `ui/` when needed.
 - On first launch, NeoMist may prompt for administrator or root access to install local certificate trust and DNS handling.
+- On Linux, NeoMist may restart itself once after first launch so it can bind local HTTPS on port `443`.
 - After startup, open `https://neomist.localhost` or use the tray menu's `Dashboard` item.
 
 To build an optimized binary:

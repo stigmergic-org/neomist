@@ -16,6 +16,7 @@ use rcgen::{
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, pkcs8_private_keys};
+use serde_json::{Map, Value};
 use sha1::{Digest, Sha1};
 use tracing::warn;
 
@@ -31,6 +32,8 @@ const LOCAL_UI_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST];
 const LOCAL_UI_CERT_HOSTS: &[&str] = &[LOCAL_UI_HOST, IPFS_API_HOST, IPFS_GATEWAY_WILDCARD_HOST];
 const NEOMIST_USER_HOME_ENV: &str = "NEOMIST_USER_HOME";
 const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
+const FIREFOX_POLICIES_PATH: &str = "/etc/firefox/policies/policies.json";
+const FIREFOX_POLICY_DEVICE_NAME: &str = "NeoMist System Trust";
 const CERT_DIR_MODE: u32 = 0o700;
 const PRIVATE_KEY_MODE: u32 = 0o600;
 const CERT_FILE_MODE: u32 = 0o644;
@@ -533,10 +536,17 @@ fn install_root_macos_system(cert_path: &Path) -> Result<()> {
 fn install_root_linux(cert_path: &Path) -> Result<()> {
     let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
     let ca_file = format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt");
+    let firefox_policy = render_linux_firefox_policy_with_neomist(
+        existing_linux_firefox_policy()?.as_deref(),
+        &ca_file,
+    )?;
+    let temp_policy_path = write_linux_firefox_policy_tempfile(&firefox_policy)?;
     let script = format!(
-        "rm -f {CA_CERT_DIR}/{CA_CERT_PREFIX}-*.crt && cp '{}' '{}' && update-ca-certificates",
-        cert_path.display(),
-        ca_file
+        "mkdir -p {CA_CERT_DIR} /etc/firefox/policies && rm -f {CA_CERT_DIR}/{CA_CERT_PREFIX}-*.crt && cp {} {} && install -m 0644 {} {} && update-ca-certificates",
+        shell_quote_path(cert_path),
+        shell_quote_str(&ca_file),
+        shell_quote_path(&temp_policy_path),
+        shell_quote_str(FIREFOX_POLICIES_PATH),
     );
     let status = Command::new("pkexec")
         .arg("/bin/sh")
@@ -545,6 +555,7 @@ fn install_root_linux(cert_path: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .status()
         .wrap_err("Failed to install root cert")?;
+    let _ = fs::remove_file(&temp_policy_path);
     if !status.success() {
         return Err(eyre::eyre!("Root cert install failed"));
     }
@@ -568,8 +579,12 @@ fn is_root_installed_linux(cert_path: &Path) -> Result<bool> {
         return Ok(false);
     }
     let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
-    let path = format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt");
-    Ok(Path::new(&path).exists())
+    let ca_file = format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt");
+    if !Path::new(&ca_file).exists() {
+        return Ok(false);
+    }
+
+    linux_firefox_policy_has_neomist_cert(existing_linux_firefox_policy()?.as_deref(), &ca_file)
 }
 
 fn uninstall_macos(data_dir: &Path) -> Result<()> {
@@ -685,7 +700,25 @@ fn keychain_contains_common_name(keychain: &str, common_name: &str) -> Result<bo
 }
 
 fn uninstall_linux(data_dir: &Path) -> Result<()> {
-    let script = format!("rm -f {CA_CERT_DIR}/{CA_CERT_PREFIX}-*.crt && update-ca-certificates");
+    let existing_policy = existing_linux_firefox_policy()?;
+    let updated_policy = render_linux_firefox_policy_without_neomist(existing_policy.as_deref())?;
+    let temp_policy_path = if let Some(policy) = updated_policy.as_deref() {
+        Some(write_linux_firefox_policy_tempfile(policy)?)
+    } else {
+        None
+    };
+    let policy_command = if let Some(path) = temp_policy_path.as_ref() {
+        format!(
+            "install -m 0644 {} {}",
+            shell_quote_path(path),
+            shell_quote_str(FIREFOX_POLICIES_PATH)
+        )
+    } else {
+        format!("rm -f {}", shell_quote_str(FIREFOX_POLICIES_PATH))
+    };
+    let script = format!(
+        "rm -f {CA_CERT_DIR}/{CA_CERT_PREFIX}-*.crt && {policy_command} && update-ca-certificates"
+    );
     let status = Command::new("pkexec")
         .arg("/bin/sh")
         .arg("-c")
@@ -693,6 +726,9 @@ fn uninstall_linux(data_dir: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .status()
         .wrap_err("Failed to remove CA certificates")?;
+    if let Some(path) = temp_policy_path {
+        let _ = fs::remove_file(path);
+    }
 
     if !status.success() {
         return Err(eyre::eyre!("Failed to remove CA certificates"));
@@ -757,6 +793,270 @@ fn cert_fingerprint_sha1(cert_path: &Path) -> Result<String> {
     let mut hasher = Sha1::new();
     hasher.update(der);
     Ok(hex::encode(hasher.finalize()).to_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FIREFOX_POLICY_DEVICE_NAME, linux_firefox_policy_has_neomist_cert,
+        render_linux_firefox_policy_with_neomist, render_linux_firefox_policy_without_neomist,
+    };
+
+    #[test]
+    fn firefox_policy_install_preserves_existing_entries_and_replaces_neomist_cert() {
+        let existing = r#"{
+  "policies": {
+    "Certificates": {
+      "Install": [
+        "/usr/local/share/ca-certificates/neomist-ca-old.crt",
+        "/opt/acme/internal-root.pem"
+      ]
+    },
+    "Homepage": {
+      "URL": "https://example.com"
+    }
+  }
+}"#;
+
+        let updated = render_linux_firefox_policy_with_neomist(
+            Some(existing),
+            "/usr/local/share/ca-certificates/neomist-ca-new.crt",
+        )
+        .unwrap();
+
+        assert!(updated.contains("/opt/acme/internal-root.pem"));
+        assert!(updated.contains("/usr/local/share/ca-certificates/neomist-ca-new.crt"));
+        assert!(!updated.contains("/usr/local/share/ca-certificates/neomist-ca-old.crt"));
+        assert!(updated.contains(FIREFOX_POLICY_DEVICE_NAME));
+        assert!(updated.contains("https://example.com"));
+    }
+
+    #[test]
+    fn firefox_policy_uninstall_removes_only_neomist_entries() {
+        let existing = r#"{
+  "policies": {
+    "Certificates": {
+      "Install": [
+        "/usr/local/share/ca-certificates/neomist-ca-current.crt",
+        "/opt/acme/internal-root.pem"
+      ]
+    },
+    "SecurityDevices": {
+      "Add": {
+        "NeoMist System Trust": "/usr/lib/aarch64-linux-gnu/pkcs11/p11-kit-trust.so",
+        "Corp Token": "/usr/lib/libpkcs11.so"
+      }
+    }
+  }
+}"#;
+
+        let updated = render_linux_firefox_policy_without_neomist(Some(existing))
+            .unwrap()
+            .unwrap();
+
+        assert!(!updated.contains("neomist-ca-current.crt"));
+        assert!(!updated.contains(FIREFOX_POLICY_DEVICE_NAME));
+        assert!(updated.contains("/opt/acme/internal-root.pem"));
+        assert!(updated.contains("Corp Token"));
+    }
+
+    #[test]
+    fn firefox_policy_detection_requires_current_neomist_cert() {
+        let existing = r#"{
+  "policies": {
+    "Certificates": {
+      "Install": [
+        "/usr/local/share/ca-certificates/neomist-ca-current.crt"
+      ]
+    }
+  }
+}"#;
+
+        assert!(linux_firefox_policy_has_neomist_cert(
+            Some(existing),
+            "/usr/local/share/ca-certificates/neomist-ca-current.crt"
+        )
+        .unwrap());
+        assert!(!linux_firefox_policy_has_neomist_cert(
+            Some(existing),
+            "/usr/local/share/ca-certificates/neomist-ca-other.crt"
+        )
+        .unwrap());
+    }
+}
+
+fn existing_linux_firefox_policy() -> Result<Option<String>> {
+    match fs::read_to_string(FIREFOX_POLICIES_PATH) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).wrap_err("Failed to read Firefox policies"),
+    }
+}
+
+fn linux_firefox_policy_has_neomist_cert(existing: Option<&str>, ca_file: &str) -> Result<bool> {
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    let value = parse_linux_firefox_policy(existing)?;
+    let Some(policies) = value.get("policies").and_then(Value::as_object) else {
+        return Ok(false);
+    };
+    let Some(certificates) = policies.get("Certificates").and_then(Value::as_object) else {
+        return Ok(false);
+    };
+    let Some(install) = certificates.get("Install").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+
+    Ok(install.iter().any(|entry| entry.as_str() == Some(ca_file)))
+}
+
+fn render_linux_firefox_policy_with_neomist(existing: Option<&str>, ca_file: &str) -> Result<String> {
+    let mut value = match existing {
+        Some(existing) => parse_linux_firefox_policy(existing)?,
+        None => Value::Object(Map::new()),
+    };
+    let root = value
+        .as_object_mut()
+        .ok_or_else(|| eyre::eyre!("Firefox policies must be a JSON object"))?;
+    let policies = root
+        .entry("policies".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| eyre::eyre!("Firefox policies.policies must be a JSON object"))?;
+    let certificates = policies
+        .entry("Certificates".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| eyre::eyre!("Firefox Certificates policy must be a JSON object"))?;
+    let install = certificates
+        .entry("Install".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| eyre::eyre!("Firefox Certificates.Install policy must be an array"))?;
+
+    install.retain(|entry| {
+        !entry
+            .as_str()
+            .is_some_and(is_neomist_firefox_certificate_policy_entry)
+    });
+    install.push(Value::String(ca_file.to_string()));
+
+    if let Some(p11_kit_path) = linux_p11_kit_trust_path() {
+        let security_devices = policies
+            .entry("SecurityDevices".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| eyre::eyre!("Firefox SecurityDevices policy must be a JSON object"))?;
+        let add = security_devices
+            .entry("Add".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| eyre::eyre!("Firefox SecurityDevices.Add policy must be a JSON object"))?;
+        add.insert(
+            FIREFOX_POLICY_DEVICE_NAME.to_string(),
+            Value::String(p11_kit_path.to_string()),
+        );
+    }
+
+    serde_json::to_string_pretty(&value).wrap_err("Failed to serialize Firefox policies")
+}
+
+fn render_linux_firefox_policy_without_neomist(existing: Option<&str>) -> Result<Option<String>> {
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let mut value = parse_linux_firefox_policy(existing)?;
+    let Some(root) = value.as_object_mut() else {
+        return Err(eyre::eyre!("Firefox policies must be a JSON object"));
+    };
+    let Some(policies) = root.get_mut("policies").and_then(Value::as_object_mut) else {
+        return Ok(Some(serde_json::to_string_pretty(&value).wrap_err("Failed to serialize Firefox policies")?));
+    };
+
+    if let Some(certificates) = policies.get_mut("Certificates").and_then(Value::as_object_mut) {
+        if let Some(install) = certificates.get_mut("Install").and_then(Value::as_array_mut) {
+            install.retain(|entry| {
+                !entry
+                    .as_str()
+                    .is_some_and(is_neomist_firefox_certificate_policy_entry)
+            });
+            if install.is_empty() {
+                certificates.remove("Install");
+            }
+        }
+        if certificates.is_empty() {
+            policies.remove("Certificates");
+        }
+    }
+
+    if let Some(security_devices) = policies
+        .get_mut("SecurityDevices")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(add) = security_devices.get_mut("Add").and_then(Value::as_object_mut) {
+            add.remove(FIREFOX_POLICY_DEVICE_NAME);
+            if add.is_empty() {
+                security_devices.remove("Add");
+            }
+        }
+        if security_devices.is_empty() {
+            policies.remove("SecurityDevices");
+        }
+    }
+
+    if policies.is_empty() {
+        root.remove("policies");
+    }
+
+    if root.is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::to_string_pretty(&value)
+        .map(Some)
+        .wrap_err("Failed to serialize Firefox policies")
+}
+
+fn parse_linux_firefox_policy(existing: &str) -> Result<Value> {
+    let value: Value = serde_json::from_str(existing).wrap_err("Failed to parse Firefox policies")?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(eyre::eyre!("Firefox policies must be a JSON object"))
+    }
+}
+
+fn is_neomist_firefox_certificate_policy_entry(path: &str) -> bool {
+    path.starts_with(&format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-")) && path.ends_with(".crt")
+}
+
+fn linux_p11_kit_trust_path() -> Option<&'static str> {
+    [
+        "/usr/lib/aarch64-linux-gnu/pkcs11/p11-kit-trust.so",
+        "/usr/lib/x86_64-linux-gnu/pkcs11/p11-kit-trust.so",
+        "/usr/lib/pkcs11/p11-kit-trust.so",
+    ]
+    .into_iter()
+    .find(|path| Path::new(path).exists())
+}
+
+fn write_linux_firefox_policy_tempfile(contents: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "neomist-firefox-policies-{}-{}.json",
+        std::process::id(),
+        fresh_serial_number(&[FIREFOX_POLICIES_PATH])
+    ));
+    fs::write(&path, contents).wrap_err("Failed to write temporary Firefox policy file")?;
+    Ok(path)
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote_str(&path.to_string_lossy())
+}
+
+fn shell_quote_str(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn security_bin() -> &'static str {

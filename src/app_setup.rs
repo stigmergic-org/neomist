@@ -122,6 +122,18 @@ pub fn prepare_runtime_setup(
         }
     }
 
+    if std::env::consts::OS == "linux" {
+        if let Err(err) = ensure_linux_privileged_https_setup() {
+            show_alert(
+                "NeoMist Setup Incomplete",
+                &format!(
+                    "NeoMist needs administrator approval to bind local HTTPS on port 443.\n\n{err}"
+                ),
+            );
+            return Err(err);
+        }
+    }
+
     info!("DNS resolver setup check");
     config = maybe_install_dns(config, config_path)?;
     info!("Certificate setup check");
@@ -207,6 +219,82 @@ fn ensure_system_cert_trust(data_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn ensure_linux_privileged_https_setup() -> Result<()> {
+    if current_user_is_root()? {
+        return Ok(());
+    }
+
+    let exe_path = current_exe_path()?;
+    if current_exe_has_bind_service_capability(&exe_path)? {
+        return Ok(());
+    }
+
+    install_linux_bind_service_capability(&exe_path)?;
+    show_alert(
+        "NeoMist Restarting",
+        "NeoMist is restarting once to finish Linux HTTPS setup on port 443.",
+    );
+    relaunch_current_process(&exe_path)?;
+    Ok(())
+}
+
+fn current_exe_has_bind_service_capability(exe_path: &Path) -> Result<bool> {
+    let output = Command::new("getcap")
+        .arg(exe_path)
+        .output()
+        .wrap_err("Failed to inspect Linux file capabilities")?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.contains("cap_net_bind_service"))
+}
+
+fn install_linux_bind_service_capability(exe_path: &Path) -> Result<()> {
+    let status = Command::new("pkexec")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "setcap cap_net_bind_service=+ep {}",
+            shell_quote(exe_path)
+        ))
+        .status()
+        .wrap_err(
+            "Failed to grant Linux bind capability. Install libcap2-bin if setcap is unavailable.",
+        )?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!(
+            "Administrator approval required to grant local HTTPS access to port 443"
+        ))
+    }
+}
+
+fn relaunch_current_process(exe_path: &Path) -> Result<()> {
+    Command::new(exe_path)
+        .args(env::args_os().skip(1))
+        .spawn()
+        .wrap_err("Failed to relaunch NeoMist after Linux HTTPS setup")?;
+    std::process::exit(0);
+}
+
+fn current_user_is_root() -> Result<bool> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .wrap_err("Failed to determine current user")?;
+
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to determine current user"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
 }
 
 fn restore_sudo_user_data_dir_ownership(data_dir: &Path) -> Result<()> {
@@ -589,12 +677,36 @@ fn show_system_setup_explainer(needs_dns: bool, needs_cert: bool, needs_cli: boo
 }
 
 fn show_alert(title: &str, message: &str) {
-    let script = format!(
-        "display alert {} message {} as critical buttons {{\"OK\"}} default button \"OK\"",
-        applescript_quote(title),
-        applescript_quote(message)
-    );
-    let _ = Command::new("osascript").arg("-e").arg(script).status();
+    if cfg!(target_os = "macos") {
+        let script = format!(
+            "display alert {} message {} as critical buttons {{\"OK\"}} default button \"OK\"",
+            applescript_quote(title),
+            applescript_quote(message)
+        );
+        let _ = Command::new("osascript").arg("-e").arg(script).status();
+        return;
+    }
+
+    if cfg!(target_os = "linux") {
+        if Command::new("kdialog")
+            .arg("--title")
+            .arg(title)
+            .arg("--msgbox")
+            .arg(message)
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return;
+        }
+
+        let _ = Command::new("zenity")
+            .arg("--info")
+            .arg("--title")
+            .arg(title)
+            .arg("--text")
+            .arg(message)
+            .status();
+    }
 }
 
 fn shell_quote(path: &Path) -> String {

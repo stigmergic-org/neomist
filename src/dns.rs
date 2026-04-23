@@ -131,7 +131,7 @@ fn ensure_macos_resolvers_noninteractive(dns_port: u16) -> Result<()> {
 }
 
 fn ensure_linux_resolvers(dns_port: u16) -> Result<bool> {
-    if !Path::new("/etc/systemd/resolved.conf.d").exists() {
+    if !systemd_resolved_detected() {
         return Err(eyre::eyre!("systemd-resolved not detected"));
     }
 
@@ -139,7 +139,7 @@ fn ensure_linux_resolvers(dns_port: u16) -> Result<bool> {
         return Ok(true);
     }
 
-    let config = format!("[Resolve]\nDNS=127.0.0.1:{dns_port}\nDomains=~eth ~wei\nDNSStubListener=no\n");
+    let config = format!("[Resolve]\nDNS=127.0.0.1:{dns_port}\nDomains=~eth ~wei\n");
 
     let script = format!(
         "mkdir -p /etc/systemd/resolved.conf.d && \
@@ -168,7 +168,7 @@ fn ensure_linux_resolvers(dns_port: u16) -> Result<bool> {
 }
 
 fn ensure_linux_resolvers_noninteractive(dns_port: u16) -> Result<()> {
-    if !Path::new("/etc/systemd/resolved.conf.d").exists() {
+    if !systemd_resolved_detected() {
         return Err(eyre::eyre!("systemd-resolved not detected"));
     }
 
@@ -176,7 +176,7 @@ fn ensure_linux_resolvers_noninteractive(dns_port: u16) -> Result<()> {
         return Ok(());
     }
 
-    let config = format!("[Resolve]\nDNS=127.0.0.1:{dns_port}\nDomains=~eth ~wei\nDNSStubListener=no\n");
+    let config = format!("[Resolve]\nDNS=127.0.0.1:{dns_port}\nDomains=~eth ~wei\n");
     fs::create_dir_all("/etc/systemd/resolved.conf.d")
         .wrap_err("Failed to create systemd-resolved config directory")?;
     fs::write(SYSTEMD_RESOLVED_CONF, config)
@@ -296,8 +296,13 @@ fn systemd_resolver_ok(path: &Path, dns_port: u16) -> bool {
         Err(_) => return false,
     };
 
+    systemd_resolver_contents_ok(&contents, dns_port)
+}
+
+fn systemd_resolver_contents_ok(contents: &str, dns_port: u16) -> bool {
     contents.contains(&format!("DNS=127.0.0.1:{dns_port}"))
         && contents.contains("Domains=~eth ~wei")
+        && !contents.contains("DNSStubListener=no")
 }
 
 fn selected_dns_port_for_install() -> Result<u16> {
@@ -361,4 +366,39 @@ fn persist_dns_port(dns_port: u16) -> Result<()> {
 fn remove_persisted_dns_port() -> Result<()> {
     let path = dns_port_file_path()?;
     remove_file_if_exists(&path)
+}
+
+fn systemd_resolved_detected() -> bool {
+    let output = match Command::new("systemctl")
+        .arg("show")
+        .arg("--property=LoadState")
+        .arg("--value")
+        .arg("systemd-resolved.service")
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return false,
+    };
+
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "loaded"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::systemd_resolver_contents_ok;
+
+    #[test]
+    fn rejects_linux_resolved_config_that_disables_stub_listener() {
+        let contents = "[Resolve]\nDNS=127.0.0.1:53535\nDomains=~eth ~wei\nDNSStubListener=no\n";
+
+        assert!(!systemd_resolver_contents_ok(contents, 53535));
+    }
+
+    #[test]
+    fn accepts_linux_resolved_config_with_stub_listener_available() {
+        let contents = "[Resolve]\nDNS=127.0.0.1:53535\nDomains=~eth ~wei\n";
+
+        assert!(systemd_resolver_contents_ok(contents, 53535));
+    }
 }

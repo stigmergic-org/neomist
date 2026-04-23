@@ -31,7 +31,6 @@ use crate::ens;
 use crate::state::AppState;
 
 const PRIMARY_HTTPS_PORT: u16 = 443;
-const FALLBACK_HTTPS_PORT: u16 = 8443;
 const NEOMIST_UI_HOST: &str = "neomist.localhost";
 static UI_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 static IPFS_PROXY_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -100,17 +99,10 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         .route("/*path", any(proxy_ipfs_gateway))
         .with_state(state.clone());
 
-    let mut listeners = bind_https_sockets(PRIMARY_HTTPS_PORT).await;
-    if listeners.is_empty() {
-        warn!(
-            "Failed to bind HTTPS sockets on port {PRIMARY_HTTPS_PORT}. Falling back to port {FALLBACK_HTTPS_PORT}"
-        );
-        listeners = bind_https_sockets(FALLBACK_HTTPS_PORT).await;
-    }
-
+    let listeners = bind_https_sockets(PRIMARY_HTTPS_PORT).await;
     if listeners.is_empty() {
         return Err(eyre::eyre!(
-            "Failed to bind any HTTPS listener on ports {PRIMARY_HTTPS_PORT} or {FALLBACK_HTTPS_PORT}"
+            "Failed to bind any HTTPS listener on port {PRIMARY_HTTPS_PORT}. NeoMist requires port {PRIMARY_HTTPS_PORT} for local HTTPS. Make sure no other service is already using the port."
         ));
     }
 
@@ -149,11 +141,13 @@ async fn bind_https_sockets(port: u16) -> Vec<TcpListener> {
     let mut listeners = Vec::new();
 
     for addr in [
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
         SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
     ] {
         match TcpListener::bind(addr).await {
             Ok(listener) => listeners.push(listener),
+            Err(err)
+                if !listeners.is_empty() && err.kind() == std::io::ErrorKind::AddrInUse => {}
             Err(err) => warn!("Failed to bind HTTPS listener on {addr}: {err}"),
         }
     }
@@ -175,7 +169,7 @@ async fn run_https_listener(
             .await
             .wrap_err("Failed to accept connection")?;
 
-        if !peer.ip().is_loopback() {
+        if !is_loopback_peer(peer) {
             warn!("Rejected non-loopback HTTPS connection from {peer}");
             continue;
         }
@@ -266,6 +260,10 @@ async fn run_https_listener(
             }
         });
     }
+}
+
+fn is_loopback_peer(peer: SocketAddr) -> bool {
+    peer.ip().is_loopback() || peer.ip().to_canonical().is_loopback()
 }
 
 fn require_neomist_ui_request(
@@ -800,8 +798,27 @@ async fn proxy_rpc(
 
 #[cfg(test)]
 mod tests {
+    use super::is_loopback_peer;
     use super::request_origin_matches_neomist_ui;
     use axum::http::{HeaderMap, HeaderValue, header::{ORIGIN, REFERER}};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    #[test]
+    fn accepts_ipv4_mapped_ipv6_loopback_peer() {
+        let peer = SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::from_bits(0x0000_0000_0000_0000_0000_ffff_7f00_0001)),
+            443,
+        );
+
+        assert!(is_loopback_peer(peer));
+    }
+
+    #[test]
+    fn rejects_non_loopback_peer() {
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 443);
+
+        assert!(!is_loopback_peer(peer));
+    }
 
     #[test]
     fn accepts_neomist_origin() {

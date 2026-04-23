@@ -7,3 +7,5 @@ ui/dist
 ui/dist
 .DS_Store
 .env
+vm-run.sh
+output.log
