@@ -276,9 +276,7 @@ async fn download_kubo(
                     return Ok(ipfs_path);
                 }
                 Some(installed_version) => {
-                    tracing::info!(
-                        "Replacing cached Kubo {installed_version} with {KUBO_VERSION}"
-                    );
+                    tracing::info!("Replacing cached Kubo {installed_version} with {KUBO_VERSION}");
                 }
                 None => {
                     tracing::info!(

@@ -17,8 +17,7 @@ pub async fn run_dns_server(port: u16) -> Result<()> {
             ));
         }
         Err(err) => {
-            return Err(err)
-                .wrap_err_with(|| format!("Failed to bind DNS UDP socket on {addr}"));
+            return Err(err).wrap_err_with(|| format!("Failed to bind DNS UDP socket on {addr}"));
         }
     };
     tracing::info!("DNS server listening on {addr}");

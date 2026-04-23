@@ -1,9 +1,14 @@
+#[cfg(target_os = "linux")]
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc::Receiver};
 use std::time::{Duration, Instant};
 
-use eyre::{Result, WrapErr};
+#[cfg(target_os = "linux")]
+use directories::BaseDirs;
+use eyre::{ContextCompat, Result, WrapErr};
 use helios::ethereum::EthereumClient;
 use image::GenericImageView;
 #[cfg(target_os = "linux")]
@@ -26,6 +31,41 @@ const ICON_INACTIVE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/logo-inactive.png"
 ));
+#[cfg(target_os = "linux")]
+const LINUX_ACTIVE_SYMBOLIC_ICON_NAME: &str = "neomist-active-symbolic";
+#[cfg(target_os = "linux")]
+const LINUX_INACTIVE_SYMBOLIC_ICON_NAME: &str = "neomist-inactive-symbolic";
+#[cfg(target_os = "linux")]
+const LINUX_ACTIVE_SYMBOLIC_ICON_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/neomist-active-symbolic.svg"
+));
+#[cfg(target_os = "linux")]
+const LINUX_INACTIVE_SYMBOLIC_ICON_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/neomist-inactive-symbolic.svg"
+));
+#[cfg(target_os = "linux")]
+const LINUX_SYMBOLIC_TEXT_COLOR_TOKEN: &str = "__NEOMIST_TEXT_COLOR__";
+#[cfg(target_os = "linux")]
+const LINUX_LIGHT_TEXT_COLOR: &str = "#232629";
+#[cfg(target_os = "linux")]
+const LINUX_DARK_TEXT_COLOR: &str = "#eff0f1";
+#[cfg(target_os = "linux")]
+const LINUX_ADWAITA_TEXT_COLOR: &str = "#2e3436";
+#[cfg(target_os = "linux")]
+const LINUX_SYMBOLIC_ICON_THEMES: [(&str, &str); 4] = [
+    ("breeze", LINUX_LIGHT_TEXT_COLOR),
+    ("breeze-dark", LINUX_DARK_TEXT_COLOR),
+    ("Adwaita", LINUX_ADWAITA_TEXT_COLOR),
+    ("hicolor", LINUX_LIGHT_TEXT_COLOR),
+];
+#[cfg(target_os = "linux")]
+const LINUX_BREEZE_ICON_DIRS: &[&str] = &["status/symbolic"];
+#[cfg(target_os = "linux")]
+const LINUX_ADWAITA_ICON_DIRS: &[&str] = &["symbolic-up-to-32/status", "symbolic/status"];
+#[cfg(target_os = "linux")]
+const LINUX_HICOLOR_ICON_DIRS: &[&str] = &["scalable/status"];
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -136,6 +176,10 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
 
     let icon_active = load_tray_icon(ICON_ACTIVE)?;
     let icon_inactive = load_tray_icon(ICON_INACTIVE)?;
+    #[cfg(target_os = "linux")]
+    let linux_symbolic_icon_dir = Some(prepare_linux_symbolic_icons()?);
+    #[cfg(not(target_os = "linux"))]
+    let linux_symbolic_icon_dir: Option<PathBuf> = None;
     let menu = Menu::new();
     let title_item = MenuItem::new(APP_NAME, false, None);
     let gas_price_item = MenuItem::new(&gas_price_menu_label(None), false, None);
@@ -181,7 +225,15 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let tray_state = tray_state.clone();
 
     let mut next_tick = Instant::now();
-    let mut last_networking_enabled: Option<bool> = None;
+    let initial_networking_enabled = resolve_networking_enabled(&tray_state);
+    update_networking_tray_icon(
+        &tray_icon,
+        initial_networking_enabled,
+        &icon_active,
+        &icon_inactive,
+        linux_symbolic_icon_dir.as_deref(),
+    )?;
+    let mut last_networking_enabled = Some(initial_networking_enabled);
     let mut last_show_gas_price = tray_state.show_gas_price();
     let mut last_gas_price_label: Option<String> = None;
     let mut linux_gas_menu_visible = false;
@@ -248,12 +300,13 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
             let networking_enabled = resolve_networking_enabled(&tray_state);
             refresh_explore_menu(networking_enabled, &explore_item);
             if last_networking_enabled != Some(networking_enabled) {
-                let icon = if networking_enabled {
-                    icon_active.clone()
-                } else {
-                    icon_inactive.clone()
-                };
-                if let Err(err) = tray_icon.set_icon(Some(icon)) {
+                if let Err(err) = update_networking_tray_icon(
+                    &tray_icon,
+                    networking_enabled,
+                    &icon_active,
+                    &icon_inactive,
+                    linux_symbolic_icon_dir.as_deref(),
+                ) {
                     warn!("Failed to update tray icon: {err}");
                 } else {
                     last_networking_enabled = Some(networking_enabled);
@@ -380,17 +433,15 @@ fn set_ns_application_activation_policy() -> bool {
 
 #[cfg(target_os = "macos")]
 unsafe fn msg_send_id(receiver: ObjcObject, selector: ObjcSelector) -> ObjcObject {
-    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector) -> ObjcObject = unsafe {
-        std::mem::transmute(objc_msgSend as *const ())
-    };
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector) -> ObjcObject =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
     unsafe { send(receiver, selector) }
 }
 
 #[cfg(target_os = "macos")]
 unsafe fn msg_send_bool(receiver: ObjcObject, selector: ObjcSelector, value: isize) -> bool {
-    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, isize) -> i8 = unsafe {
-        std::mem::transmute(objc_msgSend as *const ())
-    };
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, isize) -> i8 =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
     unsafe { send(receiver, selector, value) != 0 }
 }
 
@@ -399,6 +450,43 @@ fn load_tray_icon(bytes: &[u8]) -> Result<Icon> {
     let rgba = image.to_rgba8();
     let (width, height) = image.dimensions();
     Icon::from_rgba(rgba.into_raw(), width, height).wrap_err("Failed to create tray icon")
+}
+
+fn update_networking_tray_icon(
+    tray_icon: &tray_icon::TrayIcon,
+    networking_enabled: bool,
+    icon_active: &Icon,
+    icon_inactive: &Icon,
+    linux_symbolic_icon_dir: Option<&Path>,
+) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (icon_active, icon_inactive);
+        let Some(dir) = linux_symbolic_icon_dir else {
+            return Ok(());
+        };
+        let icon_name = if networking_enabled {
+            LINUX_ACTIVE_SYMBOLIC_ICON_NAME
+        } else {
+            LINUX_INACTIVE_SYMBOLIC_ICON_NAME
+        };
+        set_linux_symbolic_icon(tray_icon, icon_name, dir);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = linux_symbolic_icon_dir;
+        let icon = if networking_enabled {
+            icon_active.clone()
+        } else {
+            icon_inactive.clone()
+        };
+        tray_icon
+            .set_icon(Some(icon))
+            .wrap_err("Failed to update tray icon")?;
+    }
+
+    Ok(())
 }
 
 fn open_url(url: &str) {
@@ -457,6 +545,134 @@ fn gas_price_menu_label(label: Option<&str>) -> String {
     match label {
         Some(label) => format!("Gas price: {label}"),
         None => "Gas price: updating...".to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_symbolic_icons() -> Result<PathBuf> {
+    let dir = linux_symbolic_icon_dir()?;
+    fs::create_dir_all(&dir).wrap_err("Failed to create Linux tray icon directory")?;
+    for (theme_name, text_color) in LINUX_SYMBOLIC_ICON_THEMES {
+        write_linux_symbolic_icon_theme_index(&dir, theme_name)?;
+        write_linux_symbolic_icon(
+            &dir,
+            theme_name,
+            LINUX_ACTIVE_SYMBOLIC_ICON_NAME,
+            &render_linux_symbolic_icon(LINUX_ACTIVE_SYMBOLIC_ICON_TEMPLATE, text_color),
+        )?;
+        write_linux_symbolic_icon(
+            &dir,
+            theme_name,
+            LINUX_INACTIVE_SYMBOLIC_ICON_NAME,
+            &render_linux_symbolic_icon(LINUX_INACTIVE_SYMBOLIC_ICON_TEMPLATE, text_color),
+        )?;
+    }
+    Ok(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_symbolic_icon_dir() -> Result<PathBuf> {
+    let base = BaseDirs::new().wrap_err("Failed to resolve Linux icon directories")?;
+    let data_dir = base.data_dir().join("icons");
+    fs::create_dir_all(&data_dir).wrap_err("Failed to create Linux icon root")?;
+    Ok(data_dir)
+}
+
+#[cfg(target_os = "linux")]
+fn write_linux_symbolic_icon(
+    dir: &Path,
+    theme_name: &str,
+    name: &str,
+    contents: &str,
+) -> Result<()> {
+    for icon_dir in linux_symbolic_icon_files_dirs(dir, theme_name) {
+        fs::create_dir_all(&icon_dir)
+            .wrap_err("Failed to create Linux tray icon theme directory")?;
+        fs::write(icon_dir.join(format!("{name}.svg")), contents)
+            .wrap_err_with(|| format!("Failed to write Linux tray icon `{name}`"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_symbolic_icon(template: &str, text_color: &str) -> String {
+    template.replace(LINUX_SYMBOLIC_TEXT_COLOR_TOKEN, text_color)
+}
+
+#[cfg(target_os = "linux")]
+fn write_linux_symbolic_icon_theme_index(dir: &Path, theme_name: &str) -> Result<()> {
+    let theme_dir = linux_symbolic_icon_theme_dir(dir, theme_name);
+    fs::create_dir_all(&theme_dir).wrap_err("Failed to create Linux tray icon theme root")?;
+    fs::write(
+        theme_dir.join("index.theme"),
+        linux_symbolic_icon_theme_index(theme_name),
+    )
+    .wrap_err("Failed to write Linux tray icon theme index")?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_symbolic_icon_theme_index(theme_name: &str) -> String {
+    let relative_dirs = linux_symbolic_icon_theme_subdirs(theme_name);
+    let inherits = if theme_name == "hicolor" {
+        ""
+    } else {
+        "Inherits=hicolor\n"
+    };
+    let sections = relative_dirs
+        .iter()
+        .map(|relative_dir| {
+            format!(
+                "[{relative_dir}]\nSize=16\nMinSize=8\nMaxSize=512\nContext=Status\nType=Scalable\n"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[Icon Theme]\nName=NeoMist Runtime {theme_name}\n{inherits}Directories={}\n\n{sections}\n",
+        relative_dirs.join(",")
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_symbolic_icon_theme_dir(dir: &Path, theme_name: &str) -> PathBuf {
+    dir.join(theme_name)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_symbolic_icon_theme_subdirs(theme_name: &str) -> &'static [&'static str] {
+    match theme_name {
+        "breeze" | "breeze-dark" => LINUX_BREEZE_ICON_DIRS,
+        "Adwaita" => LINUX_ADWAITA_ICON_DIRS,
+        "hicolor" => LINUX_HICOLOR_ICON_DIRS,
+        _ => LINUX_HICOLOR_ICON_DIRS,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_symbolic_icon_files_dirs(dir: &Path, theme_name: &str) -> Vec<PathBuf> {
+    linux_symbolic_icon_theme_subdirs(theme_name)
+        .iter()
+        .map(|relative_dir| {
+            relative_dir.split('/').fold(
+                linux_symbolic_icon_theme_dir(dir, theme_name),
+                |path, segment| path.join(segment),
+            )
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_symbolic_icon(tray_icon: &tray_icon::TrayIcon, name: &str, dir: &Path) {
+    let app_indicator = unsafe { tray_icon.app_indicator() as *mut LinuxAppIndicator };
+    if app_indicator.is_null() {
+        return;
+    }
+
+    unsafe {
+        let indicator = &mut *app_indicator;
+        indicator.set_icon_theme_path(&dir.to_string_lossy());
+        indicator.set_icon(name);
     }
 }
 

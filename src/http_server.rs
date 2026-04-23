@@ -146,8 +146,7 @@ async fn bind_https_sockets(port: u16) -> Vec<TcpListener> {
     ] {
         match TcpListener::bind(addr).await {
             Ok(listener) => listeners.push(listener),
-            Err(err)
-                if !listeners.is_empty() && err.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(err) if !listeners.is_empty() && err.kind() == std::io::ErrorKind::AddrInUse => {}
             Err(err) => warn!("Failed to bind HTTPS listener on {addr}: {err}"),
         }
     }
@@ -266,9 +265,7 @@ fn is_loopback_peer(peer: SocketAddr) -> bool {
     peer.ip().is_loopback() || peer.ip().to_canonical().is_loopback()
 }
 
-fn require_neomist_ui_request(
-    headers: &HeaderMap,
-) -> std::result::Result<(), Response<Body>> {
+fn require_neomist_ui_request(headers: &HeaderMap) -> std::result::Result<(), Response<Body>> {
     if request_origin_matches_neomist_ui(headers) {
         return Ok(());
     }
@@ -355,7 +352,8 @@ async fn save_config_handler(
         }
         Err(err) => {
             if start_on_login_changed {
-                if let Err(revert_err) = app_setup::sync_start_on_login(current_config.start_on_login)
+                if let Err(revert_err) =
+                    app_setup::sync_start_on_login(current_config.start_on_login)
                 {
                     error!(
                         "Failed to revert start-on-login setting after config save failure: {revert_err}"
@@ -387,7 +385,10 @@ async fn serve_ui(req: Request<Body>) -> Response<Body> {
         return file_response(asset_path, file);
     }
 
-    if asset_path.starts_with("assets/") || asset_path.ends_with(".js") || asset_path.ends_with(".css") {
+    if asset_path.starts_with("assets/")
+        || asset_path.ends_with(".js")
+        || asset_path.ends_with(".css")
+    {
         return not_found();
     }
 
@@ -562,7 +563,9 @@ async fn get_about(State(state): State<AppState>) -> Response<Body> {
 
 fn helios_version() -> &'static str {
     HELIOS_VERSION
-        .get_or_init(|| locked_dependency_version("helios").unwrap_or_else(|| "unknown".to_string()))
+        .get_or_init(|| {
+            locked_dependency_version("helios").unwrap_or_else(|| "unknown".to_string())
+        })
         .as_str()
 }
 
@@ -577,7 +580,10 @@ fn locked_dependency_version(package: &str) -> Option<String> {
 async fn fetch_kubo_version(state: &AppState) -> Option<String> {
     let response = state
         .http_client
-        .post(format!("{}/api/v0/version", state.ipfs_api_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/api/v0/version",
+            state.ipfs_api_url.trim_end_matches('/')
+        ))
         .send()
         .await
         .ok()?;
@@ -585,7 +591,11 @@ async fn fetch_kubo_version(state: &AppState) -> Option<String> {
         return None;
     }
 
-    response.json::<IpfsVersionResponse>().await.ok().map(|body| body.version)
+    response
+        .json::<IpfsVersionResponse>()
+        .await
+        .ok()
+        .map(|body| body.version)
 }
 
 async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {
@@ -800,13 +810,18 @@ async fn proxy_rpc(
 mod tests {
     use super::is_loopback_peer;
     use super::request_origin_matches_neomist_ui;
-    use axum::http::{HeaderMap, HeaderValue, header::{ORIGIN, REFERER}};
+    use axum::http::{
+        HeaderMap, HeaderValue,
+        header::{ORIGIN, REFERER},
+    };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     #[test]
     fn accepts_ipv4_mapped_ipv6_loopback_peer() {
         let peer = SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::from_bits(0x0000_0000_0000_0000_0000_ffff_7f00_0001)),
+            IpAddr::V6(Ipv6Addr::from_bits(
+                0x0000_0000_0000_0000_0000_ffff_7f00_0001,
+            )),
             443,
         );
 
@@ -823,7 +838,10 @@ mod tests {
     #[test]
     fn accepts_neomist_origin() {
         let mut headers = HeaderMap::new();
-        headers.insert(ORIGIN, HeaderValue::from_static("https://neomist.localhost"));
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_static("https://neomist.localhost"),
+        );
 
         assert!(request_origin_matches_neomist_ui(&headers));
     }
@@ -831,7 +849,10 @@ mod tests {
     #[test]
     fn accepts_neomist_origin_with_port() {
         let mut headers = HeaderMap::new();
-        headers.insert(ORIGIN, HeaderValue::from_static("https://neomist.localhost:8443"));
+        headers.insert(
+            ORIGIN,
+            HeaderValue::from_static("https://neomist.localhost:8443"),
+        );
 
         assert!(request_origin_matches_neomist_ui(&headers));
     }

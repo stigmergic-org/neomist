@@ -179,8 +179,7 @@ fn ensure_linux_resolvers_noninteractive(dns_port: u16) -> Result<()> {
     let config = format!("[Resolve]\nDNS=127.0.0.1:{dns_port}\nDomains=~eth ~wei\n");
     fs::create_dir_all("/etc/systemd/resolved.conf.d")
         .wrap_err("Failed to create systemd-resolved config directory")?;
-    fs::write(SYSTEMD_RESOLVED_CONF, config)
-        .wrap_err("Failed to write systemd-resolved config")?;
+    fs::write(SYSTEMD_RESOLVED_CONF, config).wrap_err("Failed to write systemd-resolved config")?;
     restart_systemd_resolved()?;
 
     if systemd_resolver_ok(Path::new(SYSTEMD_RESOLVED_CONF), dns_port) {
@@ -319,8 +318,8 @@ fn dns_port_is_available(dns_port: u16) -> bool {
 }
 
 fn pick_available_dns_port() -> Result<u16> {
-    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .wrap_err("Failed to allocate DNS UDP port")?;
+    let socket =
+        UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).wrap_err("Failed to allocate DNS UDP port")?;
     let dns_port = socket
         .local_addr()
         .wrap_err("Failed to read allocated DNS UDP port")?
@@ -343,15 +342,18 @@ fn load_persisted_dns_port() -> Result<Option<u16>> {
         return Ok(None);
     }
 
-    let contents = fs::read_to_string(&path)
-        .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+    let contents =
+        fs::read_to_string(&path).wrap_err_with(|| format!("Failed to read {}", path.display()))?;
     let trimmed = contents.trim();
-    let dns_port = trimmed.parse::<u16>().wrap_err_with(|| {
-        format!("Failed to parse DNS port from {}", path.display())
-    })?;
+    let dns_port = trimmed
+        .parse::<u16>()
+        .wrap_err_with(|| format!("Failed to parse DNS port from {}", path.display()))?;
 
     if dns_port == 0 {
-        Err(eyre::eyre!("DNS port file {} contains port 0", path.display()))
+        Err(eyre::eyre!(
+            "DNS port file {} contains port 0",
+            path.display()
+        ))
     } else {
         Ok(Some(dns_port))
     }

@@ -14,9 +14,9 @@ mod following;
 mod gas;
 mod http_server;
 mod ipfs;
+mod rpc_proxy;
 mod state;
 mod tray;
-mod rpc_proxy;
 
 use std::collections::VecDeque;
 use std::env;
@@ -34,7 +34,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::certs::CertManager;
-use crate::config::{NEOMIST_DATA_DIR_ENV, cache_dir, config_path, data_dir, load_or_create_config};
+use crate::config::{
+    NEOMIST_DATA_DIR_ENV, cache_dir, config_path, data_dir, load_or_create_config,
+};
 use crate::state::AppState;
 
 const HELIOS_RPC_ADDR: &str = "127.0.0.1:8545";
@@ -344,11 +346,7 @@ fn init_services(
     handle.spawn({
         let state = state.clone();
         async move {
-            gas::poll_gas_price(
-                state.clone(),
-                gas_tx,
-            )
-            .await;
+            gas::poll_gas_price(state.clone(), gas_tx).await;
         }
     });
 
@@ -432,7 +430,10 @@ fn prompt_linux_uninstall(data_dir: &std::path::Path) -> Result<()> {
     let exe_path = env::current_exe().wrap_err("Failed to resolve current executable")?;
     let output = Command::new("pkexec")
         .arg("/usr/bin/env")
-        .arg(format!("{NEOMIST_DATA_DIR_ENV}={}", data_dir.to_string_lossy()))
+        .arg(format!(
+            "{NEOMIST_DATA_DIR_ENV}={}",
+            data_dir.to_string_lossy()
+        ))
         .arg(exe_path)
         .arg("system")
         .arg("uninstall")
@@ -452,7 +453,9 @@ fn prompt_linux_uninstall(data_dir: &std::path::Path) -> Result<()> {
         } else {
             "unknown error".to_string()
         };
-        Err(eyre::eyre!("Administrator approval required to uninstall NeoMist system integration: {detail}"))
+        Err(eyre::eyre!(
+            "Administrator approval required to uninstall NeoMist system integration: {detail}"
+        ))
     }
 }
 

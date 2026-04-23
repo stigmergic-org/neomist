@@ -78,9 +78,7 @@ pub fn prepare_runtime_setup(
                 if let Err(err) = ensure_trusted_certs(data_dir) {
                     show_alert(
                         "NeoMist Setup Incomplete",
-                        &format!(
-                            "NeoMist could not trust its local HTTPS certificate.\n\n{err:?}"
-                        ),
+                        &format!("NeoMist could not trust its local HTTPS certificate.\n\n{err:?}"),
                     );
                     return Err(err);
                 }
@@ -240,7 +238,8 @@ fn ensure_system_cert_trust(data_dir: &Path) -> Result<()> {
 fn maybe_install_linux_system_integration(data_dir: &Path) -> Result<()> {
     let exe_path = current_exe_path()?;
     let cert_manager = CertManager::new(data_dir);
-    let needs_https_bind = !current_user_is_root()? && !current_exe_has_bind_service_capability(&exe_path)?;
+    let needs_https_bind =
+        !current_user_is_root()? && !current_exe_has_bind_service_capability(&exe_path)?;
     let needs_dns = !dns::dns_ready();
     let needs_cert = !cert_manager
         .is_root_installed()
@@ -323,7 +322,9 @@ fn prompt_install_system_for_current_exe_linux(data_dir: &Path) -> Result<()> {
         } else {
             "unknown error".to_string()
         };
-        Err(eyre::eyre!("Administrator approval required to finish NeoMist setup: {detail}"))
+        Err(eyre::eyre!(
+            "Administrator approval required to finish NeoMist setup: {detail}"
+        ))
     }
 }
 
@@ -445,7 +446,11 @@ fn sync_start_on_login_macos(enabled: bool) -> Result<()> {
             .wrap_err_with(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    fs::write(&launch_agent_path, macos_launch_agent_contents(&bundle_path)).wrap_err_with(|| {
+    fs::write(
+        &launch_agent_path,
+        macos_launch_agent_contents(&bundle_path),
+    )
+    .wrap_err_with(|| {
         format!(
             "Failed to write macOS launch agent at {}",
             launch_agent_path.display()
@@ -596,8 +601,8 @@ fn cli_link_matches(target: &Path) -> Result<bool> {
     let target = fs::canonicalize(target).wrap_err("Failed to canonicalize NeoMist executable")?;
 
     if metadata.file_type().is_symlink() {
-        let symlink_target = fs::read_link(link_path)
-            .wrap_err_with(|| format!("Failed to read {CLI_LINK_PATH}"))?;
+        let symlink_target =
+            fs::read_link(link_path).wrap_err_with(|| format!("Failed to read {CLI_LINK_PATH}"))?;
         let resolved_target = if symlink_target.is_absolute() {
             symlink_target
         } else {
@@ -688,7 +693,9 @@ fn prompt_install_system_for_current_exe() -> Result<()> {
         } else {
             "unknown error".to_string()
         };
-        Err(eyre::eyre!("Administrator approval required to finish NeoMist setup: {detail}"))
+        Err(eyre::eyre!(
+            "Administrator approval required to finish NeoMist setup: {detail}"
+        ))
     }
 }
 

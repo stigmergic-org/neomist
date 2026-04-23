@@ -9,10 +9,7 @@ use tracing::{info, warn};
 
 use crate::state::AppState;
 
-pub async fn poll_gas_price(
-    state: AppState,
-    tx: Sender<String>,
-) {
+pub async fn poll_gas_price(state: AppState, tx: Sender<String>) {
     let mut ticker = interval(Duration::from_millis(250));
     let mut last_visible = state.tray_state.show_gas_price();
     let mut last_poll = Instant::now();

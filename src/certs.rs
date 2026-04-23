@@ -11,8 +11,8 @@ use base64::engine::general_purpose::STANDARD;
 use eyre::{Result, WrapErr};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose,
-    NameConstraints, PKCS_ECDSA_P256_SHA256, SanType,
+    ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose, NameConstraints,
+    PKCS_ECDSA_P256_SHA256, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, pkcs8_private_keys};
@@ -284,8 +284,7 @@ pub fn root_cert_path(data_dir: &Path) -> PathBuf {
 }
 
 fn generate_ec_key_pair() -> Result<KeyPair> {
-    KeyPair::generate(&PKCS_ECDSA_P256_SHA256)
-        .wrap_err("Failed to generate EC key")
+    KeyPair::generate(&PKCS_ECDSA_P256_SHA256).wrap_err("Failed to generate EC key")
 }
 
 fn create_root_cert(root_cert: &Path) -> Result<Certificate> {
@@ -298,7 +297,9 @@ fn create_root_cert(root_cert: &Path) -> Result<Certificate> {
     params.serial_number = Some(fresh_serial_number(&[ROOT_COMMON_NAME]));
 
     let cert = Certificate::from_params(params).wrap_err("Failed to build root cert")?;
-    let pem = cert.serialize_pem().wrap_err("Failed to serialize root cert")?;
+    let pem = cert
+        .serialize_pem()
+        .wrap_err("Failed to serialize root cert")?;
     write_pem_file(root_cert, &pem, CERT_FILE_MODE).wrap_err("Failed to write root cert")?;
     Ok(cert)
 }
@@ -341,7 +342,8 @@ fn create_intermediate(
 
 fn ensure_server_key(path: &Path) -> Result<()> {
     if path.exists() {
-        set_path_mode(path, PRIVATE_KEY_MODE).wrap_err("Failed to secure server key permissions")?;
+        set_path_mode(path, PRIVATE_KEY_MODE)
+            .wrap_err("Failed to secure server key permissions")?;
         return Ok(());
     }
     let key_pair = generate_ec_key_pair().wrap_err("Failed to generate server key")?;
@@ -595,10 +597,8 @@ fn is_root_installed_macos(cert_path: &Path) -> Result<bool> {
     }
     let fingerprint = cert_fingerprint_sha1(cert_path)?;
     let keychain = macos_login_keychain_path()?;
-    Ok(
-        keychain_contains_fingerprint(&keychain, &fingerprint)?
-            || keychain_contains_fingerprint(SYSTEM_KEYCHAIN_PATH, &fingerprint)?
-    )
+    Ok(keychain_contains_fingerprint(&keychain, &fingerprint)?
+        || keychain_contains_fingerprint(SYSTEM_KEYCHAIN_PATH, &fingerprint)?)
 }
 
 fn is_root_installed_linux(cert_path: &Path) -> Result<bool> {
@@ -777,7 +777,8 @@ fn uninstall_linux_noninteractive(data_dir: &Path) -> Result<()> {
         Some(policy) => {
             fs::create_dir_all("/etc/firefox/policies")
                 .wrap_err("Failed to create Firefox policies directory")?;
-            fs::write(FIREFOX_POLICIES_PATH, policy).wrap_err("Failed to write Firefox policies")?;
+            fs::write(FIREFOX_POLICIES_PATH, policy)
+                .wrap_err("Failed to write Firefox policies")?;
             set_path_mode(Path::new(FIREFOX_POLICIES_PATH), CERT_FILE_MODE)
                 .wrap_err("Failed to secure Firefox policies")?;
         }
@@ -976,16 +977,20 @@ mod tests {
   }
 }"#;
 
-        assert!(linux_firefox_policy_has_neomist_cert(
-            Some(existing),
-            "/usr/local/share/ca-certificates/neomist-ca-current.crt"
-        )
-        .unwrap());
-        assert!(!linux_firefox_policy_has_neomist_cert(
-            Some(existing),
-            "/usr/local/share/ca-certificates/neomist-ca-other.crt"
-        )
-        .unwrap());
+        assert!(
+            linux_firefox_policy_has_neomist_cert(
+                Some(existing),
+                "/usr/local/share/ca-certificates/neomist-ca-current.crt"
+            )
+            .unwrap()
+        );
+        assert!(
+            !linux_firefox_policy_has_neomist_cert(
+                Some(existing),
+                "/usr/local/share/ca-certificates/neomist-ca-other.crt"
+            )
+            .unwrap()
+        );
     }
 }
 
@@ -1015,7 +1020,10 @@ fn linux_firefox_policy_has_neomist_cert(existing: Option<&str>, ca_file: &str) 
     Ok(install.iter().any(|entry| entry.as_str() == Some(ca_file)))
 }
 
-fn render_linux_firefox_policy_with_neomist(existing: Option<&str>, ca_file: &str) -> Result<String> {
+fn render_linux_firefox_policy_with_neomist(
+    existing: Option<&str>,
+    ca_file: &str,
+) -> Result<String> {
     let mut value = match existing {
         Some(existing) => parse_linux_firefox_policy(existing)?,
         None => Value::Object(Map::new()),
@@ -1056,7 +1064,9 @@ fn render_linux_firefox_policy_with_neomist(existing: Option<&str>, ca_file: &st
             .entry("Add".to_string())
             .or_insert_with(|| Value::Object(Map::new()))
             .as_object_mut()
-            .ok_or_else(|| eyre::eyre!("Firefox SecurityDevices.Add policy must be a JSON object"))?;
+            .ok_or_else(|| {
+                eyre::eyre!("Firefox SecurityDevices.Add policy must be a JSON object")
+            })?;
         add.insert(
             FIREFOX_POLICY_DEVICE_NAME.to_string(),
             Value::String(p11_kit_path.to_string()),
@@ -1075,11 +1085,20 @@ fn render_linux_firefox_policy_without_neomist(existing: Option<&str>) -> Result
         return Err(eyre::eyre!("Firefox policies must be a JSON object"));
     };
     let Some(policies) = root.get_mut("policies").and_then(Value::as_object_mut) else {
-        return Ok(Some(serde_json::to_string_pretty(&value).wrap_err("Failed to serialize Firefox policies")?));
+        return Ok(Some(
+            serde_json::to_string_pretty(&value)
+                .wrap_err("Failed to serialize Firefox policies")?,
+        ));
     };
 
-    if let Some(certificates) = policies.get_mut("Certificates").and_then(Value::as_object_mut) {
-        if let Some(install) = certificates.get_mut("Install").and_then(Value::as_array_mut) {
+    if let Some(certificates) = policies
+        .get_mut("Certificates")
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(install) = certificates
+            .get_mut("Install")
+            .and_then(Value::as_array_mut)
+        {
             install.retain(|entry| {
                 !entry
                     .as_str()
@@ -1098,7 +1117,10 @@ fn render_linux_firefox_policy_without_neomist(existing: Option<&str>) -> Result
         .get_mut("SecurityDevices")
         .and_then(Value::as_object_mut)
     {
-        if let Some(add) = security_devices.get_mut("Add").and_then(Value::as_object_mut) {
+        if let Some(add) = security_devices
+            .get_mut("Add")
+            .and_then(Value::as_object_mut)
+        {
             add.remove(FIREFOX_POLICY_DEVICE_NAME);
             if add.is_empty() {
                 security_devices.remove("Add");
@@ -1123,7 +1145,8 @@ fn render_linux_firefox_policy_without_neomist(existing: Option<&str>) -> Result
 }
 
 fn parse_linux_firefox_policy(existing: &str) -> Result<Value> {
-    let value: Value = serde_json::from_str(existing).wrap_err("Failed to parse Firefox policies")?;
+    let value: Value =
+        serde_json::from_str(existing).wrap_err("Failed to parse Firefox policies")?;
     if value.is_object() {
         Ok(value)
     } else {
