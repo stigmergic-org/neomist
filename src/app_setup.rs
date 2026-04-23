@@ -752,9 +752,6 @@ fn show_linux_system_setup_explainer(
         "NeoMist needs administrator approval for:\n\n- {}",
         reasons.join("\n- ")
     );
-    if needs_https_bind {
-        message.push_str("\n\nNeoMist will restart once after setup so the new HTTPS permission takes effect.");
-    }
     if needs_dns || needs_cert {
         message.push_str(
             "\n\nAfter setup completes, fully restart your browser so the DNS and certificate changes take effect.",
