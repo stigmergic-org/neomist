@@ -3,6 +3,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -32,10 +34,14 @@ const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
 const CERT_DIR_MODE: u32 = 0o700;
 const PRIVATE_KEY_MODE: u32 = 0o600;
 const CERT_FILE_MODE: u32 = 0o644;
+const CERT_SCHEMA_VERSION: &str = "2";
+
+static SERIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub struct CertManager {
     cert_dir: PathBuf,
+    schema_version_path: PathBuf,
     root_cert_path: PathBuf,
     intermediate_eth_key: PathBuf,
     intermediate_eth_cert: PathBuf,
@@ -49,6 +55,7 @@ impl CertManager {
     pub fn new(data_dir: &Path) -> Self {
         let cert_dir = data_dir.join("certs");
         Self {
+            schema_version_path: cert_dir.join("version"),
             root_cert_path: cert_dir.join("root-ca-cert.pem"),
             intermediate_eth_key: cert_dir.join("intermediate-eth-key.pem"),
             intermediate_eth_cert: cert_dir.join("intermediate-eth-cert.pem"),
@@ -71,7 +78,8 @@ impl CertManager {
             && self.intermediate_wei_cert.exists()
             && self.ethereum_cert_path.exists()
             && self.server_key_path.exists()
-            && self.root_cert_path.exists();
+            && self.root_cert_path.exists()
+            && cert_schema_matches(&self.schema_version_path)?;
 
         if have_base {
             self.harden_permissions()?;
@@ -108,6 +116,12 @@ impl CertManager {
             LOCAL_UI_HOST,
             LOCAL_UI_CERT_HOSTS.to_vec(),
         )?;
+        write_pem_file(
+            &self.schema_version_path,
+            CERT_SCHEMA_VERSION,
+            CERT_FILE_MODE,
+        )
+        .wrap_err("Failed to write cert schema version")?;
 
         self.harden_permissions()?;
         Ok(())
@@ -224,6 +238,7 @@ impl CertManager {
             &self.intermediate_eth_cert,
             &self.intermediate_wei_cert,
             &self.ethereum_cert_path,
+            &self.schema_version_path,
         ] {
             if path.exists() {
                 best_effort_set_existing_path_mode(path, CERT_FILE_MODE)?;
@@ -277,6 +292,7 @@ fn create_root_cert(root_cert: &Path) -> Result<Certificate> {
     params.distinguished_name = neomist_distinguished_name(ROOT_COMMON_NAME);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.serial_number = Some(fresh_serial_number(&[ROOT_COMMON_NAME]));
 
     let cert = Certificate::from_params(params).wrap_err("Failed to build root cert")?;
     let pem = cert.serialize_pem().wrap_err("Failed to serialize root cert")?;
@@ -306,6 +322,7 @@ fn create_intermediate(
         excluded_subtrees: Vec::new(),
     });
     params.use_authority_key_identifier_extension = true;
+    params.serial_number = Some(fresh_serial_number(&[common_name, permitted_dns]));
 
     let cert = Certificate::from_params(params).wrap_err("Failed to build intermediate cert")?;
     let cert_pem = cert
@@ -355,6 +372,7 @@ fn create_leaf_cert_with_signer(
     params.alg = &PKCS_ECDSA_P256_SHA256;
     params.key_pair = Some(key_pair);
     params.distinguished_name = neomist_distinguished_name(subject_cn);
+    params.serial_number = Some(fresh_serial_number(&[subject_cn]));
     params.subject_alt_names = sans
         .into_iter()
         .map(|san| SanType::DnsName(san.to_string()))
@@ -690,6 +708,40 @@ fn cleanup_cert_files(data_dir: &Path) -> Result<()> {
         fs::remove_dir_all(cert_dir).wrap_err("Failed to remove cert directory")?;
     }
     Ok(())
+}
+
+fn cert_schema_matches(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    Ok(fs::read_to_string(path)
+        .wrap_err("Failed to read cert schema version")?
+        .trim()
+        == CERT_SCHEMA_VERSION)
+}
+
+fn fresh_serial_number(parts: &[&str]) -> u64 {
+    let counter = SERIAL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let mut hasher = Sha1::new();
+    hasher.update(now.to_le_bytes());
+    hasher.update(counter.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+
+    let digest = hasher.finalize();
+    let mut serial_bytes = [0u8; 8];
+    serial_bytes.copy_from_slice(&digest[..8]);
+    let serial = u64::from_be_bytes(serial_bytes) >> 1;
+    serial.max(1)
 }
 
 fn cert_fingerprint_sha1(cert_path: &Path) -> Result<String> {
