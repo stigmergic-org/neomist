@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 use eyre::{Result, WrapErr};
 use helios::ethereum::EthereumClient;
 use image::GenericImageView;
+#[cfg(target_os = "linux")]
+use libappindicator::AppIndicator as LinuxAppIndicator;
 #[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_void};
 use tokio::runtime::Handle;
@@ -15,6 +17,7 @@ use tray_icon::{Icon, TrayIconBuilder};
 
 use crate::ipfs::KuboManager;
 
+const APP_NAME: &str = "NeoMist";
 const ICON_ACTIVE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/logo-active.png"
@@ -134,7 +137,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let icon_active = load_tray_icon(ICON_ACTIVE)?;
     let icon_inactive = load_tray_icon(ICON_INACTIVE)?;
     let menu = Menu::new();
-    let title_item = MenuItem::new("NeoMist", false, None);
+    let title_item = MenuItem::new(APP_NAME, false, None);
     let gas_price_item = MenuItem::new(&gas_price_menu_label(None), false, None);
     let gas_price_separator = PredefinedMenuItem::separator();
     let separator_top = PredefinedMenuItem::separator();
@@ -190,6 +193,11 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
         last_gas_price_label.as_deref(),
         &mut linux_gas_menu_visible,
     );
+    sync_linux_hover_text(
+        &tray_icon,
+        last_show_gas_price,
+        last_gas_price_label.as_deref(),
+    );
     event_loop.run(move |_event, _target, control_flow| {
         *control_flow = tao::event_loop::ControlFlow::WaitUntil(next_tick);
 
@@ -232,6 +240,7 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
                     last_gas_price_label.as_deref(),
                     &mut linux_gas_menu_visible,
                 );
+                sync_linux_hover_text(&tray_icon, show_gas_price, last_gas_price_label.as_deref());
             }
 
             refresh_p2p_menu(&tray_state, &p2p_item);
@@ -449,6 +458,38 @@ fn gas_price_menu_label(label: Option<&str>) -> String {
         Some(label) => format!("Gas price: {label}"),
         None => "Gas price: updating...".to_string(),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn sync_linux_hover_text(
+    tray_icon: &tray_icon::TrayIcon,
+    show_gas_price: bool,
+    gas_price_label: Option<&str>,
+) {
+    let app_indicator = unsafe { tray_icon.app_indicator() as *mut LinuxAppIndicator };
+    if app_indicator.is_null() {
+        return;
+    }
+
+    let title = if show_gas_price {
+        gas_price_menu_label(gas_price_label)
+    } else {
+        APP_NAME.to_string()
+    };
+
+    unsafe {
+        // `tray-icon` does not expose Linux tooltip support, but AppIndicator title
+        // is used by some shells when they render hover text.
+        (&mut *app_indicator).set_title(&title);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_linux_hover_text(
+    _tray_icon: &tray_icon::TrayIcon,
+    _show_gas_price: bool,
+    _gas_price_label: Option<&str>,
+) {
 }
 
 #[cfg(target_os = "linux")]

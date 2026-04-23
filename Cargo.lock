@@ -5867,6 +5867,7 @@ dependencies = [
  "hyper-util",
  "image",
  "include_dir",
+ "libappindicator",
  "mime_guess",
  "rcgen",
  "reqwest",
