@@ -534,6 +534,10 @@ fn install_root_macos_system(cert_path: &Path) -> Result<()> {
 }
 
 fn install_root_linux(cert_path: &Path) -> Result<()> {
+    if current_user_is_root()? {
+        return install_root_linux_noninteractive(cert_path);
+    }
+
     let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
     let ca_file = format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt");
     let firefox_policy = render_linux_firefox_policy_with_neomist(
@@ -559,6 +563,29 @@ fn install_root_linux(cert_path: &Path) -> Result<()> {
     if !status.success() {
         return Err(eyre::eyre!("Root cert install failed"));
     }
+    Ok(())
+}
+
+fn install_root_linux_noninteractive(cert_path: &Path) -> Result<()> {
+    let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
+    let ca_file = PathBuf::from(format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt"));
+    let firefox_policy = render_linux_firefox_policy_with_neomist(
+        existing_linux_firefox_policy()?.as_deref(),
+        &ca_file.to_string_lossy(),
+    )?;
+
+    fs::create_dir_all(CA_CERT_DIR).wrap_err("Failed to create CA certificate directory")?;
+    fs::create_dir_all("/etc/firefox/policies")
+        .wrap_err("Failed to create Firefox policies directory")?;
+    remove_neomist_ca_files()?;
+    fs::copy(cert_path, &ca_file).wrap_err("Failed to install root certificate")?;
+    set_path_mode(&ca_file, CERT_FILE_MODE)
+        .wrap_err("Failed to secure installed root certificate")?;
+    fs::write(FIREFOX_POLICIES_PATH, firefox_policy)
+        .wrap_err("Failed to write Firefox policies")?;
+    set_path_mode(Path::new(FIREFOX_POLICIES_PATH), CERT_FILE_MODE)
+        .wrap_err("Failed to secure Firefox policies")?;
+    refresh_linux_ca_store()?;
     Ok(())
 }
 
@@ -700,6 +727,10 @@ fn keychain_contains_common_name(keychain: &str, common_name: &str) -> Result<bo
 }
 
 fn uninstall_linux(data_dir: &Path) -> Result<()> {
+    if current_user_is_root()? {
+        return uninstall_linux_noninteractive(data_dir);
+    }
+
     let existing_policy = existing_linux_firefox_policy()?;
     let updated_policy = render_linux_firefox_policy_without_neomist(existing_policy.as_deref())?;
     let temp_policy_path = if let Some(policy) = updated_policy.as_deref() {
@@ -738,12 +769,85 @@ fn uninstall_linux(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn uninstall_linux_noninteractive(data_dir: &Path) -> Result<()> {
+    let existing_policy = existing_linux_firefox_policy()?;
+    let updated_policy = render_linux_firefox_policy_without_neomist(existing_policy.as_deref())?;
+
+    match updated_policy {
+        Some(policy) => {
+            fs::create_dir_all("/etc/firefox/policies")
+                .wrap_err("Failed to create Firefox policies directory")?;
+            fs::write(FIREFOX_POLICIES_PATH, policy).wrap_err("Failed to write Firefox policies")?;
+            set_path_mode(Path::new(FIREFOX_POLICIES_PATH), CERT_FILE_MODE)
+                .wrap_err("Failed to secure Firefox policies")?;
+        }
+        None => remove_file_if_exists(Path::new(FIREFOX_POLICIES_PATH))?,
+    }
+
+    remove_neomist_ca_files()?;
+    refresh_linux_ca_store()?;
+    cleanup_cert_files(data_dir)?;
+    Ok(())
+}
+
 fn cleanup_cert_files(data_dir: &Path) -> Result<()> {
     let cert_dir = data_dir.join("certs");
     if cert_dir.exists() {
         fs::remove_dir_all(cert_dir).wrap_err("Failed to remove cert directory")?;
     }
     Ok(())
+}
+
+fn remove_neomist_ca_files() -> Result<()> {
+    let ca_dir = Path::new(CA_CERT_DIR);
+    if !ca_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(ca_dir).wrap_err("Failed to read CA certificate directory")? {
+        let entry = entry.wrap_err("Failed to inspect CA certificate entry")?;
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with(&format!("{CA_CERT_PREFIX}-")) && file_name.ends_with(".crt") {
+            remove_file_if_exists(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn refresh_linux_ca_store() -> Result<()> {
+    let status = Command::new("update-ca-certificates")
+        .status()
+        .wrap_err("Failed to refresh system CA certificates")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(eyre::eyre!("System CA certificate refresh failed"))
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).wrap_err_with(|| format!("Failed to remove {}", path.display())),
+    }
+}
+
+fn current_user_is_root() -> Result<bool> {
+    let output = Command::new("id")
+        .arg("-u")
+        .output()
+        .wrap_err("Failed to determine current user")?;
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to determine current user"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
 }
 
 fn cert_schema_matches(path: &Path) -> Result<bool> {

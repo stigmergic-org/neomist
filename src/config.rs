@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::constants::APP_DIR_NAME;
 
 const DEFAULT_CONSENSUS_RPC: &str = "https://ethereum.operationsolarstorm.org";
+pub const NEOMIST_DATA_DIR_ENV: &str = "NEOMIST_DATA_DIR";
+
 fn default_consensus_rpcs() -> Vec<String> {
     vec![DEFAULT_CONSENSUS_RPC.to_string()]
 }
@@ -57,6 +59,12 @@ pub fn config_path() -> Result<PathBuf> {
 }
 
 pub fn data_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(NEOMIST_DATA_DIR_ENV) {
+        let dir = PathBuf::from(path);
+        fs::create_dir_all(&dir).wrap_err("Failed to create data directory")?;
+        return Ok(dir);
+    }
+
     let home = data_home_dir()?;
     let dir = home.join(".local").join("share").join(APP_DIR_NAME);
     fs::create_dir_all(&dir).wrap_err("Failed to create data directory")?;

@@ -10,12 +10,13 @@ use eyre::{ContextCompat, Result, WrapErr};
 use tracing::info;
 
 use crate::certs::CertManager;
-use crate::config::{AppConfig, data_dir, save_config};
+use crate::config::{AppConfig, NEOMIST_DATA_DIR_ENV, data_dir, save_config};
 use crate::dns;
 
 const APPLICATIONS_DIR: &str = "/Applications";
 const CLI_LINK_PATH: &str = "/usr/local/bin/neomist";
 const NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV: &str = "NEOMIST_SKIP_SYSTEM_CERT_TRUST";
+const NEOMIST_REAL_USER_ENV: &str = "NEOMIST_REAL_USER";
 const START_ON_LOGIN_LABEL: &str = "org.neomist.app";
 const LINUX_AUTOSTART_FILE_NAME: &str = "neomist.desktop";
 
@@ -123,12 +124,10 @@ pub fn prepare_runtime_setup(
     }
 
     if std::env::consts::OS == "linux" {
-        if let Err(err) = ensure_linux_privileged_https_setup() {
+        if let Err(err) = maybe_install_linux_system_integration(data_dir) {
             show_alert(
                 "NeoMist Setup Incomplete",
-                &format!(
-                    "NeoMist needs administrator approval to bind local HTTPS on port 443.\n\n{err}"
-                ),
+                &format!("NeoMist could not finish Linux system setup.\n\n{err}"),
             );
             return Err(err);
         }
@@ -142,10 +141,14 @@ pub fn prepare_runtime_setup(
 }
 
 pub fn install_system_for_current_exe() -> Result<()> {
-    if std::env::consts::OS != "macos" {
-        return Err(eyre::eyre!("system install is only supported on macOS"));
+    match std::env::consts::OS {
+        "macos" => install_system_for_current_exe_macos(),
+        "linux" => install_system_for_current_exe_linux(),
+        other => Err(eyre::eyre!("system install is not supported on {other}")),
     }
+}
 
+fn install_system_for_current_exe_macos() -> Result<()> {
     if let Some(bundle_path) = current_app_bundle()? {
         if !bundle_path.starts_with(APPLICATIONS_DIR) {
             return Err(eyre::eyre!(
@@ -162,6 +165,19 @@ pub fn install_system_for_current_exe() -> Result<()> {
     restore_sudo_user_data_dir_ownership(&cert_data_dir)?;
     dns::ensure_dns_setup_noninteractive()?;
     install_cli_link(&exe_path)?;
+    Ok(())
+}
+
+fn install_system_for_current_exe_linux() -> Result<()> {
+    let exe_path = current_exe_path()?;
+    let cert_data_dir = data_dir()?;
+    ensure_local_cert_files(&cert_data_dir)?;
+    grant_linux_bind_service_capability(&exe_path)?;
+    CertManager::new(&cert_data_dir)
+        .install_root_cert_for_system()
+        .wrap_err("Failed to install root certificate")?;
+    restore_sudo_user_data_dir_ownership(&cert_data_dir)?;
+    dns::ensure_dns_setup_noninteractive()?;
     Ok(())
 }
 
@@ -221,22 +237,28 @@ fn ensure_system_cert_trust(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_linux_privileged_https_setup() -> Result<()> {
-    if current_user_is_root()? {
-        return Ok(());
-    }
-
+fn maybe_install_linux_system_integration(data_dir: &Path) -> Result<()> {
     let exe_path = current_exe_path()?;
-    if current_exe_has_bind_service_capability(&exe_path)? {
+    let cert_manager = CertManager::new(data_dir);
+    let needs_https_bind = !current_user_is_root()? && !current_exe_has_bind_service_capability(&exe_path)?;
+    let needs_dns = !dns::dns_ready();
+    let needs_cert = !cert_manager
+        .is_root_installed()
+        .wrap_err("Failed to verify root certificate")?;
+
+    if !needs_https_bind && !needs_dns && !needs_cert {
         return Ok(());
     }
 
-    install_linux_bind_service_capability(&exe_path)?;
-    show_alert(
-        "NeoMist Restarting",
-        "NeoMist is restarting once to finish Linux HTTPS setup on port 443.",
-    );
-    relaunch_current_process(&exe_path)?;
+    if !show_linux_system_setup_explainer(needs_https_bind, needs_dns, needs_cert)? {
+        return Err(eyre::eyre!("NeoMist system setup canceled by user"));
+    }
+
+    prompt_install_system_for_current_exe_linux(data_dir)?;
+    if needs_https_bind {
+        relaunch_current_process(&exe_path)?;
+    }
+
     Ok(())
 }
 
@@ -254,14 +276,10 @@ fn current_exe_has_bind_service_capability(exe_path: &Path) -> Result<bool> {
     Ok(stdout.contains("cap_net_bind_service"))
 }
 
-fn install_linux_bind_service_capability(exe_path: &Path) -> Result<()> {
-    let status = Command::new("pkexec")
-        .arg("/bin/sh")
-        .arg("-c")
-        .arg(format!(
-            "setcap cap_net_bind_service=+ep {}",
-            shell_quote(exe_path)
-        ))
+fn grant_linux_bind_service_capability(exe_path: &Path) -> Result<()> {
+    let status = Command::new("setcap")
+        .arg("cap_net_bind_service=+ep")
+        .arg(exe_path)
         .status()
         .wrap_err(
             "Failed to grant Linux bind capability. Install libcap2-bin if setcap is unavailable.",
@@ -271,8 +289,41 @@ fn install_linux_bind_service_capability(exe_path: &Path) -> Result<()> {
         Ok(())
     } else {
         Err(eyre::eyre!(
-            "Administrator approval required to grant local HTTPS access to port 443"
+            "Failed to grant local HTTPS access to port 443"
         ))
+    }
+}
+
+fn prompt_install_system_for_current_exe_linux(data_dir: &Path) -> Result<()> {
+    let exe_path = current_exe_path()?;
+    let user = current_user_name()?;
+    let output = Command::new("pkexec")
+        .arg("/usr/bin/env")
+        .arg(format!(
+            "{NEOMIST_DATA_DIR_ENV}={}",
+            data_dir.to_string_lossy()
+        ))
+        .arg(format!("{NEOMIST_REAL_USER_ENV}={user}"))
+        .arg(&exe_path)
+        .arg("system")
+        .arg("install")
+        .arg("--yes")
+        .output()
+        .wrap_err("Failed to prompt for administrator access")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "unknown error".to_string()
+        };
+        Err(eyre::eyre!("Administrator approval required to finish NeoMist setup: {detail}"))
     }
 }
 
@@ -298,13 +349,18 @@ fn current_user_is_root() -> Result<bool> {
 }
 
 fn restore_sudo_user_data_dir_ownership(data_dir: &Path) -> Result<()> {
-    let Ok(user) = env::var("SUDO_USER") else {
+    let user = env::var(NEOMIST_REAL_USER_ENV)
+        .ok()
+        .filter(|user| !user.is_empty() && user != "root")
+        .or_else(|| {
+            env::var("SUDO_USER")
+                .ok()
+                .filter(|user| !user.is_empty() && user != "root")
+        });
+
+    let Some(user) = user else {
         return Ok(());
     };
-
-    if user.is_empty() || user == "root" {
-        return Ok(());
-    }
 
     let Some(share_dir) = data_dir.parent() else {
         return Ok(());
@@ -676,6 +732,66 @@ fn show_system_setup_explainer(needs_dns: bool, needs_cert: bool, needs_cli: boo
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "Continue")
 }
 
+fn show_linux_system_setup_explainer(
+    needs_https_bind: bool,
+    needs_dns: bool,
+    needs_cert: bool,
+) -> Result<bool> {
+    let mut reasons = Vec::new();
+    if needs_https_bind {
+        reasons.push("allow NeoMist to bind local HTTPS on port 443");
+    }
+    if needs_dns {
+        reasons.push("install DNS routing for .eth and .wei");
+    }
+    if needs_cert {
+        reasons.push("trust NeoMist local HTTPS certificate for the system and Firefox");
+    }
+
+    let mut message = format!(
+        "NeoMist needs administrator approval for:\n\n- {}",
+        reasons.join("\n- ")
+    );
+    if needs_https_bind {
+        message.push_str("\n\nNeoMist will restart once after setup so the new HTTPS permission takes effect.");
+    }
+    if needs_dns || needs_cert {
+        message.push_str(
+            "\n\nAfter setup completes, fully restart your browser so the DNS and certificate changes take effect.",
+        );
+    }
+    message.push_str("\n\nNeoMist will ask for administrator approval next.");
+
+    match Command::new("kdialog")
+        .arg("--title")
+        .arg("NeoMist Needs Administrator Approval")
+        .arg("--warningcontinuecancel")
+        .arg(&message)
+        .status()
+    {
+        Ok(status) => return Ok(status.success()),
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(_) => return Ok(false),
+    }
+
+    match Command::new("zenity")
+        .arg("--question")
+        .arg("--ok-label=Continue")
+        .arg("--cancel-label=Cancel")
+        .arg("--title")
+        .arg("NeoMist Needs Administrator Approval")
+        .arg("--text")
+        .arg(&message)
+        .status()
+    {
+        Ok(status) => return Ok(status.success()),
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(_) => return Ok(false),
+    }
+
+    Ok(true)
+}
+
 fn show_alert(title: &str, message: &str) {
     if cfg!(target_os = "macos") {
         let script = format!(
@@ -711,6 +827,24 @@ fn show_alert(title: &str, message: &str) {
 
 fn shell_quote(path: &Path) -> String {
     shell_quote_str(&path.to_string_lossy())
+}
+
+fn current_user_name() -> Result<String> {
+    if let Ok(user) = env::var("USER") {
+        if !user.is_empty() {
+            return Ok(user);
+        }
+    }
+
+    let output = Command::new("id")
+        .arg("-un")
+        .output()
+        .wrap_err("Failed to determine current user name")?;
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to determine current user name"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn shell_quote_str(value: &str) -> String {

@@ -34,7 +34,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::certs::CertManager;
-use crate::config::{cache_dir, config_path, data_dir, load_or_create_config};
+use crate::config::{NEOMIST_DATA_DIR_ENV, cache_dir, config_path, data_dir, load_or_create_config};
 use crate::state::AppState;
 
 const HELIOS_RPC_ADDR: &str = "127.0.0.1:8545";
@@ -407,6 +407,13 @@ fn uninstall() -> Result<()> {
     info!("Uninstalling DNS resolvers and certificates");
     let data_dir = data_dir()?;
     let running_as_root = current_user_is_root()?;
+
+    if std::env::consts::OS == "linux" && !running_as_root {
+        prompt_linux_uninstall(&data_dir)?;
+        info!("Uninstall complete");
+        return Ok(());
+    }
+
     let needs_root = running_as_root || certs::uninstall_requires_root(&data_dir)?;
 
     if needs_root {
@@ -419,6 +426,34 @@ fn uninstall() -> Result<()> {
     certs::uninstall_certs(&data_dir)?;
     info!("Uninstall complete");
     Ok(())
+}
+
+fn prompt_linux_uninstall(data_dir: &std::path::Path) -> Result<()> {
+    let exe_path = env::current_exe().wrap_err("Failed to resolve current executable")?;
+    let output = Command::new("pkexec")
+        .arg("/usr/bin/env")
+        .arg(format!("{NEOMIST_DATA_DIR_ENV}={}", data_dir.to_string_lossy()))
+        .arg(exe_path)
+        .arg("system")
+        .arg("uninstall")
+        .arg("--yes")
+        .output()
+        .wrap_err("Failed to prompt for administrator access")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "unknown error".to_string()
+        };
+        Err(eyre::eyre!("Administrator approval required to uninstall NeoMist system integration: {detail}"))
+    }
 }
 
 fn install_system() -> Result<()> {
