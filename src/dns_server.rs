@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use eyre::{Result, WrapErr};
@@ -8,9 +9,18 @@ use tokio::net::UdpSocket;
 
 pub async fn run_dns_server(port: u16) -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let socket = UdpSocket::bind(addr)
-        .await
-        .wrap_err("Failed to bind DNS UDP socket")?;
+    let socket = match UdpSocket::bind(addr).await {
+        Ok(socket) => socket,
+        Err(err) if err.kind() == ErrorKind::AddrInUse => {
+            return Err(eyre::eyre!(
+                "DNS UDP port {port} on 127.0.0.1 is already in use. Another NeoMist instance or local service is already bound to that port."
+            ));
+        }
+        Err(err) => {
+            return Err(err)
+                .wrap_err_with(|| format!("Failed to bind DNS UDP socket on {addr}"));
+        }
+    };
     tracing::info!("DNS server listening on {addr}");
 
     let mut buf = [0u8; 512];

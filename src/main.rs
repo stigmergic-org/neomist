@@ -318,12 +318,12 @@ fn init_services(
     let helios_client = Arc::new(helios_client);
     tray_state.set_helios_client(helios_client.clone());
 
-    info!("Init: starting DNS server on 127.0.0.1:{}", dns::dns_port());
+    let dns_port = dns::dns_port()?;
+    info!("Init: starting DNS server on 127.0.0.1:{dns_port}");
     handle.spawn({
-        let dns_port = dns::dns_port();
         async move {
             if let Err(err) = dns_server::run_dns_server(dns_port).await {
-                error!("DNS server error: {err}");
+                error!("DNS server error: {err:?}");
                 std::process::exit(1);
             }
         }
