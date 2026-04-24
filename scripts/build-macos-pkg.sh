@@ -24,6 +24,12 @@ BUILD_APP=1
 SIGN_PKG=0
 OUTPUT_PKG=""
 
+artifact_app_path() {
+    local version=$1
+    local arch=$2
+    printf '%s/dist/neomist-%s-macos-%s.app' "$ROOT_DIR" "$version" "$arch"
+}
+
 usage() {
     cat <<'EOF'
 Build macOS installer package.
@@ -157,9 +163,9 @@ if [[ -z "$version" ]]; then
 fi
 
 ARCH="$(uname -m)"
-APP_PATH="${DIST_DIR}/${APP_NAME}.app"
+APP_PATH="$(artifact_app_path "$version" "$ARCH")"
 if [[ -z "$OUTPUT_PKG" ]]; then
-    OUTPUT_PKG="${DIST_DIR}/${APP_NAME}-${version}-${ARCH}.pkg"
+    OUTPUT_PKG="${DIST_DIR}/neomist-${version}-macos-${ARCH}.pkg"
 fi
 
 PAYLOAD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/neomist-pkg-root.XXXXXX")"
@@ -176,9 +182,9 @@ trap cleanup EXIT
 
 if [[ "$BUILD_APP" -eq 1 ]]; then
     if [[ "$SIGN_PKG" == "1" ]]; then
-        "${ROOT_DIR}/scripts/build-macos-app.sh" --sign
+        "${ROOT_DIR}/scripts/build-macos-app.sh" --sign --app-dir "$APP_PATH"
     else
-        "${ROOT_DIR}/scripts/build-macos-app.sh"
+        "${ROOT_DIR}/scripts/build-macos-app.sh" --app-dir "$APP_PATH"
     fi
 fi
 

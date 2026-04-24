@@ -116,8 +116,8 @@ scripts/build-macos-pkg.sh
 
 Current macOS outputs:
 
-- `dist/NeoMist.app`
-- `dist/NeoMist-<version>-<arch>.pkg`
+- `dist/neomist-<version>-macos-<arch>.app`
+- `dist/neomist-<version>-macos-<arch>.pkg`
 
 If you launch the packaged `.app` directly, place it in `/Applications` before first run so NeoMist can complete its system setup.
 
@@ -146,8 +146,10 @@ Trigger Linux CI release builds from Cargo version:
 
 Current Linux outputs:
 
-- `dist/neomist_<version>_<arch>.deb`
-- `dist/NeoMist-x86_64.AppImage`
+- `dist/neomist-<version>-linux-x86_64.deb`
+- `dist/neomist-<version>-linux-arm64.deb`
+- `dist/neomist-<version>-linux-x86_64.AppImage`
+- `dist/neomist-<version>-linux-arm64.AppImage`
 
 Linux packaging note:
 

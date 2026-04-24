@@ -6,7 +6,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/load-dotenv.sh
 . "${ROOT_DIR}/scripts/load-dotenv.sh"
 
-APP_NAME="${NEOMIST_APP_NAME:-NeoMist}"
 DIST_DIR="${ROOT_DIR}/dist"
 NOTARY_PROFILE="${NEOMIST_NOTARY_PROFILE:-}"
 NOTARY_KEYCHAIN="${NEOMIST_NOTARY_KEYCHAIN:-}"
@@ -25,8 +24,7 @@ Options:
   -h, --help       Show help
 
 Environment:
-  NEOMIST_APP_NAME       App name used for default pkg path lookup
-  NEOMIST_NOTARY_PROFILE notarytool keychain profile name (required)
+    NEOMIST_NOTARY_PROFILE notarytool keychain profile name (required)
   NEOMIST_NOTARY_KEYCHAIN Optional custom keychain path for profile lookup
   NEOMIST_NOTARY_TIMEOUT Wait timeout for notarization (default: 20m)
   NEOMIST_ENV_FILE       Optional alternate env file path (default: .env)
@@ -79,7 +77,7 @@ fi
 
 ARCH="$(uname -m)"
 if [[ -z "$PKG_PATH" ]]; then
-    PKG_PATH="${DIST_DIR}/${APP_NAME}-${version}-${ARCH}.pkg"
+    PKG_PATH="${DIST_DIR}/neomist-${version}-macos-${ARCH}.pkg"
 fi
 
 if [[ ! -f "$PKG_PATH" ]]; then

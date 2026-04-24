@@ -10,20 +10,41 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Read Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.cargo_version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read Cargo version
+        id: cargo_version
+        run: |
+          version="$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Failed to read version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   deb:
     name: Debian Package (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    needs: prepare
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: amd64
+          - name: x86_64
             runner: ubuntu-24.04
-            deb_arch: amd64
+            artifact_arch: x86_64
           - name: arm64
             runner: ubuntu-24.04-arm
-            deb_arch: arm64
+            artifact_arch: arm64
 
     steps:
       - name: Checkout
@@ -53,13 +74,14 @@ jobs:
       - name: Upload Debian artifact
         uses: actions/upload-artifact@v4
         with:
-          name: neomist-deb-${{ matrix.deb_arch }}
-          path: dist/neomist_*_${{ matrix.deb_arch }}.deb
+          name: neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.deb
+          path: dist/neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.deb
           if-no-files-found: error
 
   appimage:
     name: AppImage (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    needs: prepare
 
     strategy:
       fail-fast: false
@@ -67,10 +89,10 @@ jobs:
         include:
           - name: x86_64
             runner: ubuntu-24.04
-            appimage_arch: x86_64
+            artifact_arch: x86_64
           - name: aarch64
             runner: ubuntu-24.04-arm
-            appimage_arch: aarch64
+            artifact_arch: arm64
 
     steps:
       - name: Checkout
@@ -100,6 +122,6 @@ jobs:
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: neomist-appimage-${{ matrix.appimage_arch }}
-          path: dist/NeoMist-${{ matrix.appimage_arch }}.AppImage
+          name: neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.AppImage
+          path: dist/neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.AppImage
           if-no-files-found: error

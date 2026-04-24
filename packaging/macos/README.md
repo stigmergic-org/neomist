@@ -38,8 +38,8 @@ All macOS build/notarization scripts load project `.env` automatically when pres
 
 Outputs:
 
-- `dist/NeoMist.app`
-- `dist/NeoMist-<version>-<arch>.pkg` for Installer.app distribution
+- `dist/neomist-<version>-macos-<arch>.app`
+- `dist/neomist-<version>-macos-<arch>.pkg` for Installer.app distribution
 
 Bundle defaults:
 
@@ -80,8 +80,8 @@ Useful checks:
 
 ```bash
 security find-identity -v -p basic
-codesign --verify --strict --verbose=2 dist/NeoMist.app
-pkgutil --check-signature dist/NeoMist-<version>-<arch>.pkg
+codesign --verify --strict --verbose=2 dist/neomist-<version>-macos-<arch>.app
+pkgutil --check-signature dist/neomist-<version>-macos-<arch>.pkg
 ```
 
 ## Notarization
@@ -116,6 +116,6 @@ Optional:
 Validation after notarization:
 
 ```bash
-xcrun stapler validate dist/NeoMist-<version>-<arch>.pkg
-spctl -a -vv -t install dist/NeoMist-<version>-<arch>.pkg
+xcrun stapler validate dist/neomist-<version>-macos-<arch>.pkg
+spctl -a -vv -t install dist/neomist-<version>-macos-<arch>.pkg
 ```

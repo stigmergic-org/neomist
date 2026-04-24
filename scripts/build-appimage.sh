@@ -73,6 +73,23 @@ detect_arch() {
     esac
 }
 
+release_arch() {
+    case "$1" in
+        x86_64|amd64)
+            printf 'x86_64'
+            ;;
+        aarch64|arm64)
+            printf 'arm64'
+            ;;
+        i386|i686)
+            printf 'i386'
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
 ensure_linuxdeploy_tooling() {
     mkdir -p "$TOOLS_DIR"
 
@@ -111,12 +128,34 @@ ensure_linuxdeploy_tooling() {
 }
 
 resolve_appindicator_library() {
-    local candidates=(
+    local host_arch=$1
+    local -a candidates
+
+    case "$host_arch" in
+        x86_64)
+            candidates=(
+                /usr/lib/x86_64-linux-gnu/libayatana-appindicator3.so.1*
+                /lib/x86_64-linux-gnu/libayatana-appindicator3.so.1*
+            )
+            ;;
+        aarch64)
+            candidates=(
+                /usr/lib/aarch64-linux-gnu/libayatana-appindicator3.so.1*
+                /lib/aarch64-linux-gnu/libayatana-appindicator3.so.1*
+            )
+            ;;
+        *)
+            candidates=()
+            ;;
+    esac
+
+    candidates+=(
         /usr/lib/libayatana-appindicator3.so.1*
         /usr/lib/*/libayatana-appindicator3.so.1*
         /lib/libayatana-appindicator3.so.1*
         /lib/*/libayatana-appindicator3.so.1*
     )
+
     local candidate
     for candidate in "${candidates[@]}"; do
         if [[ -f "$candidate" ]]; then
@@ -145,6 +184,12 @@ if [[ ! -f "$ICON_SVG" || ! -f "$ICON_PNG" ]]; then
     exit 1
 fi
 
+version="$({ awk -F '"' '/^version = "/ { print $2; exit }' "${ROOT_DIR}/Cargo.toml"; } || true)"
+if [[ -z "$version" ]]; then
+    printf 'Failed to resolve app version from Cargo.toml.\n' >&2
+    exit 1
+fi
+
 LINUXDEPLOY_BIN="$(ensure_linuxdeploy_tooling)"
 export PATH="$(dirname "$LINUXDEPLOY_BIN"):${PATH}"
 export APPIMAGE_EXTRACT_AND_RUN=1
@@ -161,8 +206,10 @@ if [[ ! -x "$BINARY_PATH" ]]; then
     exit 1
 fi
 
-APPINDICATOR_LIB="$(resolve_appindicator_library)"
-APPIMAGE_NAME="${APP_NAME}-$(detect_arch 2>/dev/null || uname -m).AppImage"
+host_arch="$(detect_arch 2>/dev/null || uname -m)"
+APPINDICATOR_LIB="$(resolve_appindicator_library "$host_arch")"
+artifact_arch="$(release_arch "$host_arch")"
+APPIMAGE_NAME="neomist-${version}-linux-${artifact_arch}.AppImage"
 
 rm -rf "$APPDIR_PATH"
 mkdir -p "$APPDIR_PATH/usr/bin" "$APPDIR_PATH/usr/share/applications" "$APPDIR_PATH/usr/share/metainfo"

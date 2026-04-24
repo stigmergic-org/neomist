@@ -11,8 +11,7 @@ EXECUTABLE_NAME="${NEOMIST_EXECUTABLE_NAME:-neomist}"
 BUNDLE_ID="${NEOMIST_BUNDLE_ID:-eth.neomist.app}"
 PROFILE="${NEOMIST_PROFILE:-release}"
 TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
-APP_DIR_DEFAULT="${ROOT_DIR}/dist/${APP_NAME}.app"
-APP_DIR="$APP_DIR_DEFAULT"
+APP_DIR=""
 ICON_SOURCE="${NEOMIST_ICON_SOURCE:-${ROOT_DIR}/assets/icon.png}"
 PLIST_TEMPLATE="${ROOT_DIR}/packaging/macos/Info.plist.template"
 APP_SIGN_IDENTITY="${NEOMIST_APP_SIGN_IDENTITY:-}"
@@ -129,6 +128,11 @@ version="$({ awk -F '"' '/^version = "/ { print $2; exit }' "${ROOT_DIR}/Cargo.t
 if [[ -z "$version" ]]; then
     printf 'Failed to resolve app version from Cargo.toml.\n' >&2
     exit 1
+fi
+
+ARCH="$(uname -m)"
+if [[ -z "$APP_DIR" ]]; then
+    APP_DIR="${ROOT_DIR}/dist/neomist-${version}-macos-${ARCH}.app"
 fi
 
 if [[ "$BUILD_BINARY" -eq 1 ]]; then

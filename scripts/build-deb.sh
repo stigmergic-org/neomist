@@ -14,6 +14,20 @@ MAINTAINER="${NEOMIST_DEB_MAINTAINER:-NeoMist <packaging@localhost>}"
 HOMEPAGE="${NEOMIST_DEB_HOMEPAGE:-https://neomist.eth.link}"
 BUILD_BINARY=1
 
+release_arch() {
+    case "$1" in
+        amd64)
+            printf 'x86_64'
+            ;;
+        arm64)
+            printf 'arm64'
+            ;;
+        *)
+            printf '%s' "$1"
+            ;;
+    esac
+}
+
 usage() {
     cat <<'EOF'
 Build NeoMist Debian package.
@@ -93,7 +107,8 @@ if [[ ! -x "$BINARY_PATH" ]]; then
 fi
 
 architecture="$(dpkg --print-architecture)"
-deb_output_path="${OUTPUT_DIR}/${PACKAGE_NAME}_${version}_${architecture}.deb"
+artifact_arch="$(release_arch "$architecture")"
+deb_output_path="${OUTPUT_DIR}/${PACKAGE_NAME}-${version}-linux-${artifact_arch}.deb"
 
 rm -rf "$PACKAGE_ROOT"
 mkdir -p "$PACKAGE_ROOT/DEBIAN"

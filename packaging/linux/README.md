@@ -2,8 +2,10 @@
 
 ## Outputs
 
-- `dist/neomist_<version>_<arch>.deb`
-- `dist/NeoMist-x86_64.AppImage`
+- `dist/neomist-<version>-linux-x86_64.deb`
+- `dist/neomist-<version>-linux-arm64.deb`
+- `dist/neomist-<version>-linux-x86_64.AppImage`
+- `dist/neomist-<version>-linux-arm64.AppImage`
 
 Current Linux app ID / desktop ID: `eth.neomist.app`
 
