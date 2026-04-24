@@ -552,8 +552,8 @@ fn gas_price_menu_label(label: Option<&str>) -> String {
 fn prepare_linux_symbolic_icons() -> Result<PathBuf> {
     let dir = linux_symbolic_icon_dir()?;
     fs::create_dir_all(&dir).wrap_err("Failed to create Linux tray icon directory")?;
+    cleanup_linux_symbolic_theme_indexes(&dir)?;
     for (theme_name, text_color) in LINUX_SYMBOLIC_ICON_THEMES {
-        write_linux_symbolic_icon_theme_index(&dir, theme_name)?;
         write_linux_symbolic_icon(
             &dir,
             theme_name,
@@ -600,38 +600,25 @@ fn render_linux_symbolic_icon(template: &str, text_color: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn write_linux_symbolic_icon_theme_index(dir: &Path, theme_name: &str) -> Result<()> {
-    let theme_dir = linux_symbolic_icon_theme_dir(dir, theme_name);
-    fs::create_dir_all(&theme_dir).wrap_err("Failed to create Linux tray icon theme root")?;
-    fs::write(
-        theme_dir.join("index.theme"),
-        linux_symbolic_icon_theme_index(theme_name),
-    )
-    .wrap_err("Failed to write Linux tray icon theme index")?;
+fn cleanup_linux_symbolic_theme_indexes(dir: &Path) -> Result<()> {
+    for (theme_name, _) in LINUX_SYMBOLIC_ICON_THEMES {
+        cleanup_linux_symbolic_theme_index(dir, theme_name)?;
+    }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn linux_symbolic_icon_theme_index(theme_name: &str) -> String {
-    let relative_dirs = linux_symbolic_icon_theme_subdirs(theme_name);
-    let inherits = if theme_name == "hicolor" {
-        ""
-    } else {
-        "Inherits=hicolor\n"
+fn cleanup_linux_symbolic_theme_index(dir: &Path, theme_name: &str) -> Result<()> {
+    let index_path = linux_symbolic_icon_theme_dir(dir, theme_name).join("index.theme");
+    let Ok(contents) = fs::read_to_string(&index_path) else {
+        return Ok(());
     };
-    let sections = relative_dirs
-        .iter()
-        .map(|relative_dir| {
-            format!(
-                "[{relative_dir}]\nSize=16\nMinSize=8\nMaxSize=512\nContext=Status\nType=Scalable\n"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "[Icon Theme]\nName=NeoMist Runtime {theme_name}\n{inherits}Directories={}\n\n{sections}\n",
-        relative_dirs.join(",")
-    )
+    if contents.contains("Name=NeoMist Runtime") {
+        fs::remove_file(&index_path).wrap_err_with(|| {
+            format!("Failed to remove generated icon theme file `{theme_name}`")
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
