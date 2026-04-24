@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 APP_NAME="${NEOMIST_APP_NAME:-NeoMist}"
 EXECUTABLE_NAME="${NEOMIST_EXECUTABLE_NAME:-neomist}"
-BUNDLE_ID="${NEOMIST_BUNDLE_ID:-org.neomist.app}"
+BUNDLE_ID="${NEOMIST_BUNDLE_ID:-eth.neomist.app}"
 PROFILE="${NEOMIST_PROFILE:-release}"
 TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
 APP_DIR_DEFAULT="${ROOT_DIR}/dist/${APP_NAME}.app"
@@ -38,7 +38,7 @@ Options:
 Environment:
   NEOMIST_APP_NAME          App bundle name (default: NeoMist)
   NEOMIST_EXECUTABLE_NAME   Binary name inside app (default: neomist)
-  NEOMIST_BUNDLE_ID         Bundle identifier (default: org.neomist.app)
+  NEOMIST_BUNDLE_ID         Bundle identifier (default: eth.neomist.app)
   NEOMIST_PROFILE           Cargo profile (default: release)
   NEOMIST_ICON_SOURCE       PNG source for generated AppIcon.icns
   NEOMIST_APP_SIGN_IDENTITY Optional Developer ID Application identity

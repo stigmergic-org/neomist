@@ -1,0 +1,105 @@
+name: Linux Packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Debian Package (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            runner: ubuntu-24.04
+            deb_arch: amd64
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            deb_arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev libglib2.0-dev libgtk-3-dev libayatana-appindicator3-dev appstream desktop-file-utils
+
+      - name: Build Debian package
+        run: scripts/build-deb.sh
+
+      - name: Upload Debian artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neomist-deb-${{ matrix.deb_arch }}
+          path: dist/neomist_*_${{ matrix.deb_arch }}.deb
+          if-no-files-found: error
+
+  appimage:
+    name: AppImage (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            runner: ubuntu-24.04
+            appimage_arch: x86_64
+          - name: aarch64
+            runner: ubuntu-24.04-arm
+            appimage_arch: aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgtk-3-dev libayatana-appindicator3-dev patchelf appstream desktop-file-utils
+
+      - name: Build AppImage
+        run: scripts/build-appimage.sh
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neomist-appimage-${{ matrix.appimage_arch }}
+          path: dist/NeoMist-${{ matrix.appimage_arch }}.AppImage
+          if-no-files-found: error

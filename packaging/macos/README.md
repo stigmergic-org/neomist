@@ -45,7 +45,7 @@ Bundle defaults:
 
 - app name: `NeoMist`
 - executable: `neomist`
-- bundle id: `org.neomist.app`
+- bundle id: `eth.neomist.app`
 - `LSUIElement=true` so app behaves like menu bar app instead of regular Dock app
 
 ## Installer Package

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>eth.neomist.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>NeoMist</name>
+  <summary>Local-first browser companion for .eth and .wei sites</summary>
+  <developer id="eth.neomist">
+    <name>Stigmergic</name>
+  </developer>
+  <launchable type="desktop-id">eth.neomist.app.desktop</launchable>
+  <url type="homepage">https://neomist.eth.link</url>
+  <description>
+    <p>
+      NeoMist runs local DNS, HTTPS, Ethereum light-client, and IPFS services so users can open
+      .eth and .wei sites without depending on centralized gateways.
+    </p>
+    <p>
+      Linux native packaging keeps NeoMist's host DNS, certificate, tray, and privileged-port
+      setup in normal desktop system paths.
+    </p>
+  </description>
+  <content_rating type="oars-1.1" />
+</component>

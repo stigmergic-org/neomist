@@ -123,6 +123,47 @@ If you launch the packaged `.app` directly, place it in `/Applications` before f
 
 More packaging details live in `packaging/macos/README.md`.
 
+## Linux Packaging
+
+Build a Debian package:
+
+```bash
+scripts/build-deb.sh
+```
+
+Build an AppImage:
+
+```bash
+scripts/build-appimage.sh
+```
+
+Trigger Linux CI release builds from Cargo version:
+
+1. Open GitHub `Actions`
+2. Run `Tag From Cargo`
+3. Workflow reads `Cargo.toml`, creates `v<version>` tag, and fails if that tag already exists
+4. Tag push triggers `Linux Packages`
+
+Current Linux outputs:
+
+- `dist/neomist_<version>_<arch>.deb`
+- `dist/NeoMist-x86_64.AppImage`
+
+Linux packaging note:
+
+- `.deb` is primary Linux package because it installs NeoMist into stable native system paths and fits current DNS / CA trust / privileged-port model.
+- `.deb` manages runtime deps with `dpkg-shlibdeps` plus explicit host-tool deps for NeoMist's tray, DNS, cert, and integration flow.
+- AppImage is secondary convenience artifact. It remains useful for direct download, but current Linux setup still assumes stable writable executable path for `setcap` and autostart.
+- AppImage bundles shared libraries, but still relies on host system for integration tools like `pkexec`, `setcap`, `systemctl`, `update-ca-certificates`, and `xdg-open`.
+- Current repo supports host-native Linux builds cleanly: `.deb` and AppImage on arm64 here, same scripts on x86_64 hosts. Full 4-target local matrix from this arm64 machine still needs extra cross/emulation setup.
+
+Current packaging ID defaults:
+
+- Linux desktop ID: `eth.neomist.app`
+- macOS bundle ID: `eth.neomist.app`
+
+More packaging details live in `packaging/linux/README.md`.
+
 ## Project Layout
 
 - `src/` Rust app, DNS, TLS, ENS, IPFS, tray, and HTTP server code

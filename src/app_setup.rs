@@ -17,7 +17,7 @@ const APPLICATIONS_DIR: &str = "/Applications";
 const CLI_LINK_PATH: &str = "/usr/local/bin/neomist";
 const NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV: &str = "NEOMIST_SKIP_SYSTEM_CERT_TRUST";
 const NEOMIST_REAL_USER_ENV: &str = "NEOMIST_REAL_USER";
-const START_ON_LOGIN_LABEL: &str = "org.neomist.app";
+const START_ON_LOGIN_LABEL: &str = "eth.neomist.app";
 const LINUX_AUTOSTART_FILE_NAME: &str = "neomist.desktop";
 
 pub fn prepare_runtime_setup(

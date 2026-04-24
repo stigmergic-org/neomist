@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=NeoMist
+Comment=Browse .eth and .wei sites through local-first DNS and IPFS
+Exec=neomist
+Icon=eth.neomist.app
+Terminal=false
+Type=Application
+Categories=Network;
+Keywords=Ethereum;ENS;IPFS;DNS;Web3;
+StartupNotify=false
