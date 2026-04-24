@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Read Cargo version
         id: cargo_version
@@ -48,10 +48,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -72,7 +72,7 @@ jobs:
         run: scripts/build-deb.sh
 
       - name: Upload Debian artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.deb
           path: dist/neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.deb
@@ -96,10 +96,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
@@ -120,7 +120,7 @@ jobs:
         run: scripts/build-appimage.sh
 
       - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.AppImage
           path: dist/neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.AppImage
