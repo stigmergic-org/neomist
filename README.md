@@ -142,7 +142,7 @@ Trigger Linux CI release builds from Cargo version:
 1. Open GitHub `Actions`
 2. Run `Tag And Build`
 3. Workflow reads `Cargo.toml`, creates `v<version>` tag, and fails if that tag already exists
-4. Tag push triggers `Linux Packages`
+4. Workflow explicitly dispatches `Linux Packages` against that new tag
 
 Current Linux outputs:
 
