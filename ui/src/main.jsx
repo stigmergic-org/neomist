@@ -19,7 +19,7 @@ const setFavicon = (useDark) => {
 
 const applyTheme = (matches) => {
   const useDark = typeof matches === 'boolean' ? matches : themeMedia.matches;
-  const theme = useDark ? 'dark' : 'light';
+  const theme = useDark ? 'neomist_vapor_dark' : 'neomist_vapor';
   document.documentElement.setAttribute('data-theme', theme);
   document.documentElement.style.colorScheme = useDark ? 'dark' : 'light';
   setFavicon(useDark);

@@ -22,19 +22,21 @@ const FOAM_PALETTE_OVERRIDES = {
 };
 
 const PANEL_CLASS =
-  'rounded-2xl border border-base-300/70 bg-base-100/80 shadow-sm backdrop-blur';
+  'vapor-panel rounded-2xl border border-base-300/80 bg-base-100/80 shadow-sm backdrop-blur';
 const SUBTLE_PANEL_CLASS =
-  'rounded-xl border border-base-300/60 bg-base-100/60 shadow-sm backdrop-blur';
+  'vapor-subtle-panel rounded-xl border border-base-300/70 bg-base-100/70 shadow-sm backdrop-blur';
 const PRIMARY_BUTTON_CLASS =
-  'inline-flex h-12 items-center justify-center rounded-xl bg-primary px-5 text-sm font-medium text-primary-content transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50';
+  'vapor-button-primary inline-flex h-12 items-center justify-center rounded-xl px-5 text-sm font-semibold text-primary-content transition disabled:cursor-not-allowed disabled:opacity-50';
 const SECONDARY_BUTTON_CLASS =
-  'inline-flex h-12 items-center justify-center rounded-xl border border-base-300 bg-base-100/80 px-5 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/50 disabled:cursor-not-allowed disabled:opacity-50';
+  'vapor-button-secondary inline-flex h-12 items-center justify-center rounded-xl border border-base-300 bg-base-100/80 px-5 text-sm font-semibold text-base-content transition disabled:cursor-not-allowed disabled:opacity-50';
 const SMALL_SECONDARY_BUTTON_CLASS =
-  'inline-flex h-10 items-center justify-center rounded-lg border border-base-300 bg-base-100/75 px-4 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/50 disabled:cursor-not-allowed disabled:opacity-50';
+  'vapor-button-secondary inline-flex h-10 items-center justify-center rounded-lg border border-base-300 bg-base-100/75 px-4 text-sm font-semibold text-base-content transition disabled:cursor-not-allowed disabled:opacity-50';
 const ICON_BUTTON_CLASS =
-  'inline-flex h-11 w-11 items-center justify-center rounded-xl border border-base-300 bg-base-100/75 text-base-content transition hover:border-base-content/15 hover:bg-base-200/50 disabled:cursor-not-allowed disabled:opacity-50';
+  'vapor-icon-button inline-flex h-11 w-11 items-center justify-center rounded-xl border border-base-300 bg-base-100/75 text-base-content transition disabled:cursor-not-allowed disabled:opacity-50';
 const INPUT_CLASS =
-  'h-14 w-full rounded-xl border border-base-300 bg-base-100/85 px-4 text-base outline-none transition placeholder:text-base-content/35 focus:border-primary/45 focus:bg-base-100';
+  'vapor-input h-14 w-full rounded-xl border border-base-300 bg-base-100/85 px-4 text-base outline-none transition placeholder:text-base-content/35';
+const CHIP_BUTTON_CLASS =
+  'vapor-chip-button rounded-full border border-base-300 px-4 py-2 text-sm font-medium text-base-content';
 
 function classNames(...values) {
   return values.filter(Boolean).join(' ');
@@ -637,8 +639,8 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen">
-      <div className="mx-auto flex min-h-screen max-w-[1480px] flex-col px-6 pb-8 pt-6">
+    <div className="vapor-shell min-h-screen">
+      <div className="mx-auto flex min-h-screen max-w-[1480px] flex-col px-4 pb-6 pt-4 sm:px-6 sm:pb-8 sm:pt-6">
         <Header route={route} navigate={navigate} seedingCount={seedingSummary.total} />
 
         <main className="mt-6 flex-1 animate-rise">
@@ -687,11 +689,11 @@ function Header({ route, navigate, seedingCount }) {
   const settingsActive = route.page === 'settings';
 
   return (
-    <header className={classNames(PANEL_CLASS, 'flex items-center justify-between px-5 py-4')}>
+    <header className={classNames(PANEL_CLASS, 'flex flex-col gap-4 px-4 py-4 sm:px-5 lg:flex-row lg:items-center lg:justify-between')}>
       <button
         type="button"
         onClick={() => navigate('/')}
-        className="flex items-center gap-3 rounded-xl px-2 py-1 text-left transition hover:bg-base-200/40"
+        className="flex items-center gap-3 rounded-xl px-2 py-1 text-left transition hover:bg-base-100/55"
       >
         <picture>
           <source srcSet="/icon-dark.svg" media="(prefers-color-scheme: dark)" />
@@ -704,16 +706,16 @@ function Header({ route, navigate, seedingCount }) {
         </div>
       </button>
 
-      <div className="flex items-center gap-3">
-        <nav className="flex items-center gap-1 rounded-full border border-base-300/70 bg-base-200/45 p-1">
+      <div className="flex w-full items-center justify-between gap-3 lg:w-auto lg:justify-end">
+        <nav className="vapor-nav flex items-center gap-1 rounded-full border border-base-300/70 bg-base-100/70 p-1">
           <button
             type="button"
             aria-current={openActive ? 'page' : undefined}
             className={classNames(
-              'rounded-full px-4 py-2 text-sm font-medium transition',
+              'rounded-full border px-4 py-2 text-sm font-medium transition',
               openActive
-                ? 'bg-base-100 text-base-content shadow'
-                : 'text-base-content/65 hover:text-base-content'
+                ? 'border-primary/18 bg-primary/12 text-primary shadow-sm shadow-primary/10'
+                : 'border-transparent text-base-content/65 hover:border-base-300 hover:bg-base-100/75 hover:text-base-content'
             )}
             onClick={() => navigate('/')}
           >
@@ -724,15 +726,22 @@ function Header({ route, navigate, seedingCount }) {
             type="button"
             aria-current={seedingActive ? 'page' : undefined}
             className={classNames(
-              'flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition',
+              'flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium transition',
               seedingActive
-                ? 'bg-base-100 text-base-content shadow'
-                : 'text-base-content/65 hover:text-base-content'
+                ? 'border-primary/18 bg-primary/12 text-primary shadow-sm shadow-primary/10'
+                : 'border-transparent text-base-content/65 hover:border-base-300 hover:bg-base-100/75 hover:text-base-content'
             )}
             onClick={() => navigate('/seeding')}
           >
             <span>Seeding</span>
-            <span className="rounded-full bg-base-200 px-2 py-0.5 text-xs text-base-content/65">
+            <span
+              className={classNames(
+                'rounded-full px-2 py-0.5 text-xs',
+                seedingActive
+                  ? 'bg-primary/10 text-primary'
+                  : 'vapor-badge text-base-content/65'
+              )}
+            >
               {seedingCount}
             </span>
           </button>
@@ -743,7 +752,7 @@ function Header({ route, navigate, seedingCount }) {
           aria-label="Settings"
           className={classNames(
             ICON_BUTTON_CLASS,
-            settingsActive ? 'border-base-content/15 bg-base-200/60' : ''
+            settingsActive ? 'border-accent/20 bg-base-100/85' : ''
           )}
           onClick={() => navigate('/settings')}
         >
@@ -921,15 +930,15 @@ function HomePage({
   };
 
   return (
-    <div className="grid min-h-[calc(100vh-156px)] grid-cols-[minmax(0,1.15fr)_420px] gap-6">
-      <section className={classNames(PANEL_CLASS, 'relative overflow-hidden px-8 py-10')}>
-        <div className="pointer-events-none absolute inset-0 opacity-60">
-          <div className="absolute -left-20 top-0 h-72 w-72 rounded-full bg-primary/15 blur-3xl" />
-          <div className="absolute bottom-0 right-0 h-64 w-64 rounded-full bg-secondary/10 blur-3xl" />
+    <div className="grid min-h-[calc(100vh-156px)] gap-6 xl:grid-cols-[minmax(0,1.15fr)_420px]">
+      <section className={classNames(PANEL_CLASS, 'relative overflow-hidden px-6 py-8 sm:px-8 sm:py-10')}>
+        <div className="pointer-events-none absolute inset-0 opacity-80">
+          <div className="absolute -left-20 top-0 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
+          <div className="absolute bottom-0 right-0 h-64 w-64 rounded-full bg-accent/10 blur-3xl" />
         </div>
 
         <div className="relative z-10 max-w-3xl">
-          <h1 className="text-5xl font-semibold leading-[1.02] tracking-tight">
+          <h1 className="text-4xl font-semibold leading-[1.02] tracking-tight sm:text-5xl lg:text-6xl">
             Explore the Ethereum ecosystem.
           </h1>
 
@@ -938,7 +947,7 @@ function HomePage({
             resolving everything locally, giving you true, trustless access to dapps.
           </p>
 
-          <form onSubmit={handleSubmit} className="mt-10 grid grid-cols-[minmax(0,1fr)_auto] gap-3 relative" ref={containerRef}>
+          <form onSubmit={handleSubmit} className="relative mt-10 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" ref={containerRef}>
             <div className="relative">
               <input
                 ref={inputRef}
@@ -976,7 +985,7 @@ function HomePage({
               />
 
               {isFocused && (value.trim().length >= 3) && (suggestions.length > 0 || isSearching) && (
-                <div className="absolute left-0 top-[calc(100%+8px)] z-50 w-full overflow-hidden rounded-xl border border-base-300/70 bg-base-100 shadow-xl">
+                <div className={classNames(SUBTLE_PANEL_CLASS, 'absolute left-0 top-[calc(100%+8px)] z-50 w-full shadow-xl')}>
                   {isSearching && suggestions.length === 0 ? (
                     <div className="flex items-center gap-3 px-4 py-3 text-sm text-base-content/55">
                       <span className="loading loading-spinner loading-sm" />
@@ -1024,7 +1033,7 @@ function HomePage({
             {inputError || 'Press Enter to open in a new tab. Press / at any time to focus the field.'}
           </p>
 
-          <div className="mt-12 rounded-2xl border border-base-300/60 bg-base-100/45 p-6 shadow-sm">
+          <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-12 p-6')}>
             {recentDomains.length > 0 ? (
               <div>
                 <div className="flex items-center justify-between gap-4">
@@ -1049,7 +1058,7 @@ function HomePage({
                     <button
                       key={domain}
                       type="button"
-                      className="rounded-full border border-base-300 bg-base-100/80 px-4 py-2 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/45"
+                      className={CHIP_BUTTON_CLASS}
                       onClick={() => openDapp(domain)}
                     >
                       {domain}
@@ -1070,7 +1079,7 @@ function HomePage({
                   <button
                     key={domain}
                     type="button"
-                    className="rounded-full border border-base-300 bg-base-100/80 px-4 py-2 text-sm font-medium text-base-content transition hover:border-base-content/15 hover:bg-base-200/45"
+                    className={CHIP_BUTTON_CLASS}
                     onClick={() => openDapp(domain)}
                   >
                     {domain}
@@ -1128,7 +1137,7 @@ function SeedingOverviewPanel({ summary, domains, loading, error, storageUsed, n
         </button>
       </div>
 
-      <div className="mt-6 grid grid-cols-2 gap-3">
+        <div className="mt-6 grid gap-3 sm:grid-cols-2">
         <MetricTile label="Sites" value={summary.total} />
         <MetricTile label="Following" value={summary.following} />
         <MetricTile label="Partial" value={summary.partial} />
@@ -1426,8 +1435,8 @@ function SeedingPage({
       {error ? <p className="text-sm text-error">{error}</p> : null}
       {actionError ? <p className="text-sm text-error">{actionError}</p> : null}
 
-      <div className="grid grid-cols-[360px_minmax(0,1fr)] gap-6">
-        <section className={classNames(PANEL_CLASS, 'flex min-h-[720px] flex-col p-5')}>
+      <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
+        <section className={classNames(PANEL_CLASS, 'flex flex-col p-5 xl:min-h-[720px]')}>
           <div>
             <label className="mb-2 block text-sm font-medium">Search domains</label>
             <input
@@ -1447,7 +1456,7 @@ function SeedingPage({
                 key={item.id}
                 type="button"
                 onClick={() => setFilter(item.id)}
-                className={classNames('btn btn-sm', filter === item.id ? 'btn-neutral' : 'btn-ghost')}
+                className={classNames('btn btn-sm', filter === item.id ? 'btn-primary' : 'btn-ghost')}
               >
                 {item.label}
               </button>
@@ -1550,7 +1559,7 @@ function DomainDetailPanel({
 }) {
   if (selectedMissing) {
     return (
-      <section className={classNames(PANEL_CLASS, 'flex min-h-[720px] items-center justify-center p-8')}>
+      <section className={classNames(PANEL_CLASS, 'flex items-center justify-center p-8 xl:min-h-[720px]')}>
         <div className="max-w-md text-center">
           <h2 className="text-2xl font-semibold tracking-tight">Site not found</h2>
           <p className="mt-3 text-sm leading-6 text-base-content/60">
@@ -1563,7 +1572,7 @@ function DomainDetailPanel({
 
   if (!detailDomain) {
     return (
-      <section className={classNames(PANEL_CLASS, 'flex min-h-[720px] items-center justify-center p-8')}>
+      <section className={classNames(PANEL_CLASS, 'flex items-center justify-center p-8 xl:min-h-[720px]')}>
         <div className="max-w-md text-center">
           <h2 className="text-2xl font-semibold tracking-tight">Nothing seeded yet</h2>
           <p className="mt-3 text-sm leading-6 text-base-content/60">
@@ -1578,8 +1587,8 @@ function DomainDetailPanel({
   const isPreview = !routeDomain;
 
   return (
-    <section className={classNames(PANEL_CLASS, 'min-h-[720px] p-6')}>
-      <div className="flex items-start justify-between gap-6">
+    <section className={classNames(PANEL_CLASS, 'p-6 xl:min-h-[720px]')}>
+      <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
             {isPreview ? <StatusPill tone="neutral">Preview</StatusPill> : null}
@@ -1600,7 +1609,7 @@ function DomainDetailPanel({
             href={`https://${detailDomain.domain}`}
             target="_blank"
             rel="noreferrer"
-            className="btn btn-primary"
+            className={PRIMARY_BUTTON_CLASS}
             onClick={() => rememberRecentTarget(detailDomain.domain)}
           >
             Open dapp
@@ -1608,7 +1617,7 @@ function DomainDetailPanel({
         </div>
       </div>
 
-      <div className="mt-6 rounded-2xl border border-base-300/60 bg-base-100/45 p-5">
+      <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-6 p-5')}>
         <div className="flex items-center justify-between gap-4 text-sm">
           <span className="font-medium">Coverage</span>
           <span className="text-base-content/60">{coverage.detail}</span>
@@ -1626,7 +1635,7 @@ function DomainDetailPanel({
         <MetricTile label="Content size" value={formatBytes(detailDomain.full_size)} />
       </div>
 
-      <div className="mt-6 flex items-center gap-3">
+      <div className="mt-6 flex flex-wrap items-center gap-3">
         <button
           type="button"
           className={`btn btn-outline ${detailDomain.auto_seeding ? 'btn-warning' : 'btn-success'}`}
@@ -1666,7 +1675,7 @@ function DomainDetailPanel({
 
               return (
                 <article key={`${detailDomain.domain}:${version.timestamp}:${version.cid}`} className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-                  <div className="flex items-start justify-between gap-6">
+                  <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <div className="flex items-center gap-2">
                         {index === 0 ? <StatusPill tone="info">Latest</StatusPill> : null}
@@ -1679,7 +1688,7 @@ function DomainDetailPanel({
                       <p className="mt-2 font-mono text-xs text-base-content/60 break-all">{version.cid}</p>
                     </div>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
                       <a
                         href={version.visit_url || '#'}
                         target="_blank"
@@ -1709,7 +1718,7 @@ function DomainDetailPanel({
                     </div>
                   </div>
 
-                  <div className="mt-5 grid grid-cols-[minmax(0,1fr)_320px] gap-5">
+                  <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
                     <div>
                       <div className="flex items-center justify-between gap-4 text-sm">
                         <span className="font-medium">Coverage</span>
@@ -1720,16 +1729,16 @@ function DomainDetailPanel({
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3 text-sm">
-                      <div className="min-w-0 rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                    <div className="grid gap-3 text-sm sm:grid-cols-3">
+                      <div className={classNames(SUBTLE_PANEL_CLASS, 'min-w-0 p-3')}>
                         <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Stored</p>
                         <p className="mt-2 font-medium">{formatBytes(version.local_size)}</p>
                       </div>
-                      <div className="min-w-0 rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                      <div className={classNames(SUBTLE_PANEL_CLASS, 'min-w-0 p-3')}>
                         <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Total</p>
                         <p className="mt-2 font-medium">{formatBytes(version.full_size)}</p>
                       </div>
-                      <div className="min-w-0 rounded-2xl border border-base-300/60 bg-base-100/55 p-3">
+                      <div className={classNames(SUBTLE_PANEL_CLASS, 'min-w-0 p-3')}>
                         <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Seeders</p>
                         <p className="mt-2 font-medium">{formatProviderCount(versionProviderCount)}</p>
                       </div>
@@ -1992,13 +2001,13 @@ function SettingsPage() {
         </p>
 
         {status.message && status.type === 'success' ? (
-          <div className="absolute right-8 top-8 rounded-full border border-success/25 bg-success/10 px-4 py-1.5 text-xs font-medium text-success animate-rise">
+          <div className="animate-rise mt-5 rounded-full border border-success/25 bg-success/10 px-4 py-1.5 text-xs font-medium text-success sm:absolute sm:right-8 sm:top-8 sm:mt-0">
             {status.message}
           </div>
         ) : null}
 
         {status.message && status.type === 'error' ? (
-          <div className="absolute right-8 top-8 rounded-full border border-error/25 bg-error/10 px-4 py-1.5 text-xs font-medium text-error animate-rise">
+          <div className="animate-rise mt-5 rounded-full border border-error/25 bg-error/10 px-4 py-1.5 text-xs font-medium text-error sm:absolute sm:right-8 sm:top-8 sm:mt-0">
             {status.message}
           </div>
         ) : null}
@@ -2012,11 +2021,11 @@ function SettingsPage() {
             
             <div className="grid gap-3">
               {consensusRpcs.map((rpc, index) => (
-                <div key={`consensus-${index}`} className="flex items-center gap-2">
+                <div key={`consensus-${index}`} className="flex flex-wrap items-start gap-2 sm:flex-nowrap sm:items-center">
                   <div className="flex flex-col gap-0.5">
                     <button
                       type="button"
-                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
                       onClick={() => moveRpcUp(index, consensusRpcs, setConsensusRpcs)}
                       disabled={index === 0}
                     >
@@ -2024,7 +2033,7 @@ function SettingsPage() {
                     </button>
                     <button
                       type="button"
-                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
                       onClick={() => moveRpcDown(index, consensusRpcs, setConsensusRpcs)}
                       disabled={index === consensusRpcs.length - 1}
                     >
@@ -2074,11 +2083,11 @@ function SettingsPage() {
             
             <div className="grid gap-3">
               {executionRpcs.map((rpc, index) => (
-                <div key={`exec-${index}`} className="flex items-center gap-2">
+                <div key={`exec-${index}`} className="flex flex-wrap items-start gap-2 sm:flex-nowrap sm:items-center">
                   <div className="flex flex-col gap-0.5">
                     <button
                       type="button"
-                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
                       onClick={() => moveRpcUp(index, executionRpcs, setExecutionRpcs)}
                       disabled={index === 0}
                     >
@@ -2086,7 +2095,7 @@ function SettingsPage() {
                     </button>
                     <button
                       type="button"
-                      className="flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
                       onClick={() => moveRpcDown(index, executionRpcs, setExecutionRpcs)}
                       disabled={index === executionRpcs.length - 1}
                     >
@@ -2135,7 +2144,7 @@ function SettingsPage() {
               </div>
             </div>
 
-            <div className="mt-4 overflow-hidden rounded-2xl border border-base-300/60 bg-base-100/55">
+            <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-4 overflow-hidden p-0')}>
               <div className="flex flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-sm font-medium">Follow checks</p>
@@ -2143,15 +2152,15 @@ function SettingsPage() {
                 </div>
 
                 <div className="flex items-center gap-3">
+                  <span className="text-sm text-base-content/60">minutes</span>
                   <input
-                    className="h-12 w-28 rounded-xl border border-base-300 bg-base-100/85 px-3 text-sm outline-none transition focus:border-primary/45 focus:bg-base-100"
+                    className={classNames(INPUT_CLASS, 'h-12 w-28 px-3 text-sm')}
                     value={followingInterval}
                     onChange={(event) => setFollowingInterval(event.target.value)}
                     type="number"
                     min="0"
                     max="10080"
                   />
-                  <span className="text-sm text-base-content/60">minutes</span>
                 </div>
               </div>
 
@@ -2234,19 +2243,19 @@ function SettingsPage() {
           </div>
 
           <div className="mt-5 grid gap-3 md:grid-cols-3">
-            <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
+            <div className={classNames(SUBTLE_PANEL_CLASS, 'p-4')}>
               <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">NeoMist</p>
               <p className="mt-2 text-lg font-semibold tracking-tight">{neomistVersion}</p>
               <p className="mt-2 text-sm text-base-content/55">Desktop app</p>
             </div>
 
-            <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
+            <div className={classNames(SUBTLE_PANEL_CLASS, 'p-4')}>
               <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Helios</p>
               <p className="mt-2 text-lg font-semibold tracking-tight">{heliosVersion}</p>
               <p className="mt-2 text-sm text-base-content/55">Ethereum light client</p>
             </div>
 
-            <div className="rounded-2xl border border-base-300/60 bg-base-100/55 p-4">
+            <div className={classNames(SUBTLE_PANEL_CLASS, 'p-4')}>
               <p className="text-xs uppercase tracking-[0.2em] text-base-content/45">Kubo</p>
               <p className="mt-2 text-lg font-semibold tracking-tight">{kuboVersion}</p>
               <p className="mt-2 text-sm text-base-content/55">{kuboDetail}</p>
@@ -2304,7 +2313,7 @@ function StatusPill({ tone = 'neutral', children }) {
   return (
     <span
       className={classNames(
-        'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
+        'vapor-badge inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium',
         styles[tone] || styles.neutral
       )}
     >
@@ -2324,7 +2333,7 @@ function ProgressBar({ ratio, tone = 'neutral', size = 'md' }) {
   const sizeClass = size === 'sm' ? 'h-1.5' : 'h-2';
 
   return (
-    <div className={classNames(sizeClass, 'overflow-hidden rounded-full bg-base-200/80')}>
+    <div className={classNames(sizeClass, 'overflow-hidden rounded-full bg-base-200/80 shadow-inner')}>
       <div
         className={classNames('h-full rounded-full transition-all', styles[tone] || styles.neutral)}
         style={{ width: `${Math.max(0, Math.min(ratio, 1)) * 100}%` }}
@@ -2335,7 +2344,7 @@ function ProgressBar({ ratio, tone = 'neutral', size = 'md' }) {
 
 function SectionEyebrow({ children }) {
   return (
-    <span className="inline-flex rounded-full border border-base-300/70 bg-base-100/75 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.28em] text-base-content/50">
+    <span className="vapor-badge inline-flex rounded-full border border-base-300/70 bg-base-100/75 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.28em] text-base-content/50">
       {children}
     </span>
   );

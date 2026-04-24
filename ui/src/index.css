@@ -17,11 +17,16 @@
 
   html {
     min-height: 100%;
+    background:
+      radial-gradient(48% 42% at 12% 8%, oklch(var(--p) / 0.07), transparent 62%),
+      radial-gradient(34% 30% at 88% 12%, oklch(var(--a) / 0.08), transparent 68%),
+      linear-gradient(180deg, oklch(var(--b1)), oklch(var(--b2)) 100%);
+    background-attachment: fixed;
   }
 
   body {
     min-height: 100vh;
-    background-color: oklch(var(--b1));
+    background: transparent;
     color: oklch(var(--bc));
     position: relative;
     text-rendering: optimizeLegibility;
@@ -33,17 +38,8 @@
     position: fixed;
     inset: 0;
     background:
-      radial-gradient(
-        70% 58% at 0% 0%,
-        oklch(var(--p) / 0.12),
-        transparent 60%
-      ),
-      radial-gradient(
-        54% 42% at 100% 4%,
-        oklch(var(--s) / 0.08),
-        transparent 60%
-      ),
-      linear-gradient(180deg, oklch(var(--b1)), oklch(var(--b2)));
+      radial-gradient(36% 30% at 50% 10%, oklch(var(--p) / 0.06), transparent 70%),
+      radial-gradient(30% 26% at 88% 24%, oklch(var(--a) / 0.05), transparent 72%);
     z-index: -1;
   }
 
@@ -71,6 +67,127 @@
   ::-webkit-scrollbar-track {
     background: transparent;
   }
+}
+
+@layer components {
+  .vapor-shell {
+    position: relative;
+  }
+
+  .vapor-panel,
+  .vapor-subtle-panel {
+    position: relative;
+    border-color: oklch(var(--bc) / 0.1);
+    backdrop-filter: blur(12px) saturate(120%);
+  }
+
+  .vapor-panel {
+    background: oklch(var(--b1) / 0.82);
+    box-shadow:
+      0 18px 50px oklch(var(--p) / 0.06),
+      0 1px 0 rgba(255, 255, 255, 0.45) inset;
+  }
+
+  .vapor-subtle-panel {
+    background: oklch(var(--b1) / 0.7);
+    box-shadow:
+      0 10px 30px oklch(var(--p) / 0.04),
+      0 1px 0 rgba(255, 255, 255, 0.38) inset;
+  }
+
+  .vapor-nav {
+    box-shadow:
+      0 8px 24px oklch(var(--p) / 0.04),
+      0 1px 0 rgba(255, 255, 255, 0.38) inset;
+  }
+
+  .vapor-button-primary,
+  .btn-primary {
+    border-color: oklch(var(--p) / 0.34);
+    background: linear-gradient(135deg, oklch(var(--p)), oklch(var(--s) / 0.92));
+    box-shadow:
+      0 10px 24px oklch(var(--p) / 0.18),
+      0 1px 0 rgba(255, 255, 255, 0.24) inset;
+  }
+
+  .vapor-button-secondary,
+  .vapor-icon-button,
+  .btn:not(.btn-primary),
+  .btn-outline {
+    border-color: oklch(var(--bc) / 0.1);
+    background: oklch(var(--b1) / 0.84);
+    box-shadow:
+      0 8px 20px oklch(var(--p) / 0.05),
+      0 1px 0 rgba(255, 255, 255, 0.42) inset;
+  }
+
+  .vapor-input {
+    border-color: oklch(var(--bc) / 0.12);
+    background: oklch(var(--b1) / 0.9);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      0 6px 18px oklch(var(--p) / 0.04);
+    backdrop-filter: blur(8px);
+  }
+
+  .vapor-chip-button,
+  .vapor-badge {
+    border-color: oklch(var(--bc) / 0.1);
+    background: oklch(var(--b1) / 0.78);
+    box-shadow: 0 6px 16px oklch(var(--p) / 0.04);
+  }
+
+  .vapor-button-primary,
+  .vapor-button-secondary,
+  .vapor-icon-button,
+  .btn,
+  .vapor-chip-button {
+    transition:
+      transform 0.2s ease,
+      filter 0.2s ease,
+      border-color 0.2s ease,
+      background-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .vapor-button-primary:hover,
+  .vapor-button-secondary:hover,
+  .vapor-icon-button:hover,
+  .btn:hover,
+  .vapor-chip-button:hover {
+    transform: translateY(-1px);
+  }
+
+  .vapor-button-secondary:hover,
+  .vapor-icon-button:hover,
+  .btn-outline:hover,
+  .vapor-chip-button:hover {
+    border-color: oklch(var(--a) / 0.22);
+  }
+
+  .btn {
+    text-transform: none;
+    font-weight: 600;
+  }
+
+  .btn-ghost {
+    background: transparent;
+    box-shadow: none;
+    border-color: transparent;
+  }
+
+  .btn-ghost:hover {
+    background: oklch(var(--b1) / 0.62);
+  }
+
+  .vapor-input:focus {
+    border-color: oklch(var(--a) / 0.4);
+    box-shadow:
+      0 0 0 3px oklch(var(--a) / 0.12),
+      inset 0 1px 0 rgba(255, 255, 255, 0.64),
+      0 8px 20px oklch(var(--p) / 0.06);
+  }
+
 }
 
 @layer utilities {
