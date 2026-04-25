@@ -32,14 +32,14 @@ Notarize signed package:
 NEOMIST_NOTARY_PROFILE="neomist-notary" scripts/notarize-macos-pkg.sh
 ```
 
-`scripts/build-macos-pkg.sh` calls `scripts/build-macos-app.sh` internally. Keep `build-macos-app.sh` only if you want standalone `.app` output for local testing.
+`scripts/build-macos-pkg.sh` builds temporary staged `.app` internally for installer payload. Keep `build-macos-app.sh` if you want standalone `.app` output for local testing.
 
 All macOS build/notarization scripts load project `.env` automatically when present. Use `NEOMIST_ENV_FILE=/path/to/file` to override.
 
 Outputs:
 
-- `dist/neomist-<version>-macos-<arch>.app`
 - `dist/neomist-<version>-macos-<arch>.pkg` for Installer.app distribution
+- `dist/neomist-<version>-macos-<arch>.app` only when you run `scripts/build-macos-app.sh`
 
 Bundle defaults:
 
@@ -55,6 +55,7 @@ Bundle defaults:
 Current `pkg` flow installs:
 
 - `NeoMist.app` into `/Applications`
+- moves any existing `/Applications/NeoMist.app` aside before install so upgrades can cross bundle ID changes
 - NeoMist certificate files and trust for current console user during package `postinstall`
 - DNS resolver files during package `postinstall`
 - `/usr/local/bin/neomist` symlink during package `postinstall`

@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -eu
+
+APP_PATH="/Applications/__APP_NAME__.app"
+BACKUP_PATH="${APP_PATH}.neomist-backup"
+
+if [ -e "$BACKUP_PATH" ]; then
+    rm -rf "$BACKUP_PATH"
+fi
+
+if [ -e "$APP_PATH" ]; then
+    mv "$APP_PATH" "$BACKUP_PATH"
+fi

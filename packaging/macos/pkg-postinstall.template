@@ -3,6 +3,7 @@
 set -eu
 
 APP_PATH="/Applications/__APP_NAME__.app"
+BACKUP_PATH="${APP_PATH}.neomist-backup"
 BIN_PATH="${APP_PATH}/Contents/MacOS/__EXECUTABLE_NAME__"
 
 if [ ! -x "$BIN_PATH" ]; then
@@ -16,9 +17,11 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
     if [ -n "$USER_HOME" ] && [ -d "$USER_HOME" ]; then
         printf 'Installing NeoMist certificate trust, DNS resolvers, and CLI link...\n'
         SUDO_USER="$CONSOLE_USER" HOME="$USER_HOME" "$BIN_PATH" system install --yes
+        rm -rf "$BACKUP_PATH"
         exit 0
     fi
 fi
 
 printf 'Installing NeoMist DNS resolvers and CLI link...\n'
 NEOMIST_SKIP_SYSTEM_CERT_TRUST=1 "$BIN_PATH" system install --yes
+rm -rf "$BACKUP_PATH"

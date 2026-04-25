@@ -13,6 +13,7 @@ COMPONENT_PKG_IDENTIFIER="${NEOMIST_COMPONENT_PKG_IDENTIFIER:-${PKG_IDENTIFIER}.
 PROFILE="${NEOMIST_PROFILE:-release}"
 DIST_DIR="${ROOT_DIR}/dist"
 SCRIPT_TEMPLATE="${ROOT_DIR}/packaging/macos/pkg-postinstall.template"
+PREINSTALL_TEMPLATE="${ROOT_DIR}/packaging/macos/pkg-preinstall.template"
 DIST_TEMPLATE="${ROOT_DIR}/packaging/macos/product-distribution.xml.template"
 RESOURCE_TEMPLATE_DIR="${ROOT_DIR}/packaging/macos/installer-resources"
 SIGN_IDENTITY="${NEOMIST_INSTALLER_SIGN_IDENTITY:-}"
@@ -28,6 +29,39 @@ artifact_app_path() {
     local version=$1
     local arch=$2
     printf '%s/dist/neomist-%s-macos-%s.app' "$ROOT_DIR" "$version" "$arch"
+}
+
+stage_app_bundle() {
+    local source_app_path=$1
+    local staged_app_path=$2
+
+    rm -rf "$staged_app_path"
+    cp -R "$source_app_path" "$staged_app_path"
+}
+
+write_component_plist() {
+    local output_path=$1
+
+    cat > "$output_path" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>RootRelativeBundlePath</key>
+    <string>Applications/${APP_NAME}.app</string>
+    <key>BundleIsRelocatable</key>
+    <false/>
+    <key>BundleIsVersionChecked</key>
+    <false/>
+    <key>BundleHasStrictIdentifier</key>
+    <false/>
+    <key>BundleOverwriteAction</key>
+    <string>upgrade</string>
+  </dict>
+</array>
+</plist>
+EOF
 }
 
 usage() {
@@ -53,6 +87,38 @@ Environment:
   NEOMIST_INSTALLER_SIGN_IDENTITY  Optional pkg signing identity
   NEOMIST_ENV_FILE                 Optional alternate env file path (default: .env)
 EOF
+}
+
+resolve_binary_version() {
+    local binary_path=$1
+    local version_output
+
+    if [[ ! -x "$binary_path" ]]; then
+        printf 'Missing executable for version check: %s\n' "$binary_path" >&2
+        exit 1
+    fi
+
+    version_output="$("$binary_path" --version 2>/dev/null || true)"
+    if [[ -z "$version_output" ]]; then
+        printf 'Failed to read binary version from: %s\n' "$binary_path" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "${version_output##* }"
+}
+
+validate_app_bundle_version() {
+    local app_path=$1
+    local expected_version=$2
+    local binary_path="${app_path}/Contents/MacOS/${EXECUTABLE_NAME}"
+    local actual_version
+
+    actual_version="$(resolve_binary_version "$binary_path")"
+    if [[ "$actual_version" != "$expected_version" ]]; then
+        printf 'App bundle version mismatch: expected %s, got %s from %s\n' \
+            "$expected_version" "$actual_version" "$binary_path" >&2
+        exit 1
+    fi
 }
 
 codesign_args() {
@@ -146,7 +212,7 @@ if [[ "$SIGN_PKG" == "1" && -z "$SIGN_IDENTITY" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$SCRIPT_TEMPLATE" || ! -f "$DIST_TEMPLATE" ]]; then
+if [[ ! -f "$SCRIPT_TEMPLATE" || ! -f "$PREINSTALL_TEMPLATE" || ! -f "$DIST_TEMPLATE" ]]; then
     printf 'Missing pkg packaging template.\n' >&2
     exit 1
 fi
@@ -168,35 +234,39 @@ if [[ -z "$OUTPUT_PKG" ]]; then
     OUTPUT_PKG="${DIST_DIR}/neomist-${version}-macos-${ARCH}.pkg"
 fi
 
-PAYLOAD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/neomist-pkg-root.XXXXXX")"
 SCRIPT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/neomist-pkg-scripts.XXXXXX")"
 BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/neomist-pkg-build.XXXXXX")"
 RESOURCE_ROOT="${BUILD_ROOT}/resources"
+PAYLOAD_ROOT="${BUILD_ROOT}/payload"
+STAGED_APP_PATH="${BUILD_ROOT}/${APP_NAME}.app"
 COMPONENT_PKG_PATH="${BUILD_ROOT}/${APP_NAME}-component.pkg"
 DIST_PATH="${BUILD_ROOT}/distribution.xml"
+COMPONENT_PLIST_PATH="${BUILD_ROOT}/components.plist"
 
 cleanup() {
-    rm -rf "$PAYLOAD_ROOT" "$SCRIPT_ROOT" "$BUILD_ROOT"
+    rm -rf "$SCRIPT_ROOT" "$BUILD_ROOT"
 }
 trap cleanup EXIT
 
 if [[ "$BUILD_APP" -eq 1 ]]; then
     if [[ "$SIGN_PKG" == "1" ]]; then
-        "${ROOT_DIR}/scripts/build-macos-app.sh" --sign --app-dir "$APP_PATH"
+        "${ROOT_DIR}/scripts/build-macos-app.sh" --sign --app-dir "$STAGED_APP_PATH"
     else
-        "${ROOT_DIR}/scripts/build-macos-app.sh" --app-dir "$APP_PATH"
+        "${ROOT_DIR}/scripts/build-macos-app.sh" --app-dir "$STAGED_APP_PATH"
     fi
+else
+    if [[ ! -d "$APP_PATH" ]]; then
+        printf 'Missing app bundle: %s\n' "$APP_PATH" >&2
+        exit 1
+    fi
+    stage_app_bundle "$APP_PATH" "$STAGED_APP_PATH"
 fi
 
-if [[ ! -d "$APP_PATH" ]]; then
-    printf 'Missing app bundle: %s\n' "$APP_PATH" >&2
-    exit 1
-fi
+validate_app_bundle_version "$STAGED_APP_PATH" "$version"
 
-mkdir -p "${PAYLOAD_ROOT}/Applications" "$(dirname "$OUTPUT_PKG")"
-cp -R "$APP_PATH" "${PAYLOAD_ROOT}/Applications/${APP_NAME}.app"
+mkdir -p "$(dirname "$OUTPUT_PKG")"
 
-PAYLOAD_APP_PATH="${PAYLOAD_ROOT}/Applications/${APP_NAME}.app"
+PAYLOAD_APP_PATH="$STAGED_APP_PATH"
 if [[ "$SIGN_PKG" == "1" && -n "$APP_SIGN_IDENTITY" ]]; then
     if ! command -v codesign >/dev/null 2>&1; then
         printf 'codesign not found. Install Xcode command line tools.\n' >&2
@@ -214,6 +284,15 @@ elif [[ "$SIGN_PKG" == "1" ]]; then
         exit 1
     fi
 fi
+
+mkdir -p "${PAYLOAD_ROOT}/Applications"
+stage_app_bundle "$PAYLOAD_APP_PATH" "${PAYLOAD_ROOT}/Applications/${APP_NAME}.app"
+write_component_plist "$COMPONENT_PLIST_PATH"
+
+sed \
+    -e "s|__APP_NAME__|${APP_NAME}|g" \
+    "$PREINSTALL_TEMPLATE" > "${SCRIPT_ROOT}/preinstall"
+chmod 755 "${SCRIPT_ROOT}/preinstall"
 
 sed \
     -e "s|__APP_NAME__|${APP_NAME}|g" \
@@ -238,6 +317,7 @@ sed \
 
 PKGBUILD_ARGS=(
     --root "$PAYLOAD_ROOT"
+    --component-plist "$COMPONENT_PLIST_PATH"
     --identifier "$COMPONENT_PKG_IDENTIFIER"
     --version "$version"
     --install-location "/"

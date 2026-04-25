@@ -48,6 +48,37 @@ Environment:
 EOF
 }
 
+resolve_binary_version() {
+    local binary_path=$1
+    local version_output
+
+    if [[ ! -x "$binary_path" ]]; then
+        printf 'Missing executable for version check: %s\n' "$binary_path" >&2
+        exit 1
+    fi
+
+    version_output="$("$binary_path" --version 2>/dev/null || true)"
+    if [[ -z "$version_output" ]]; then
+        printf 'Failed to read binary version from: %s\n' "$binary_path" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "${version_output##* }"
+}
+
+validate_binary_version() {
+    local binary_path=$1
+    local expected_version=$2
+    local actual_version
+
+    actual_version="$(resolve_binary_version "$binary_path")"
+    if [[ "$actual_version" != "$expected_version" ]]; then
+        printf 'Binary version mismatch: expected %s, got %s from %s\n' \
+            "$expected_version" "$actual_version" "$binary_path" >&2
+        exit 1
+    fi
+}
+
 codesign_args() {
     local -n args_ref=$1
     args_ref=(--force --sign "$APP_SIGN_IDENTITY")
@@ -145,13 +176,22 @@ if [[ ! -x "$BINARY_PATH" ]]; then
     exit 1
 fi
 
+validate_binary_version "$BINARY_PATH" "$version"
+
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 INFO_PLIST_PATH="${CONTENTS_DIR}/Info.plist"
 
 mkdir -p "$(dirname "$APP_DIR")"
-rm -rf "$APP_DIR"
+if [[ -e "$APP_DIR" ]]; then
+    if ! rm -rf "$APP_DIR"; then
+        printf 'Failed to replace existing app bundle: %s\n' "$APP_DIR" >&2
+        printf 'Existing bundle is likely owned by another user. Fix ownership or remove it manually, then rerun.\n' >&2
+        printf 'Suggested fix: sudo chown -R %s "%s"\n' "$(id -un)" "$APP_DIR" >&2
+        exit 1
+    fi
+fi
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY_PATH" "${MACOS_DIR}/${EXECUTABLE_NAME}"
