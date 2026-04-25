@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use directories::BaseDirs;
-use eyre::{ContextCompat, Result, WrapErr};
+use eyre::{Result, WrapErr};
 use helios::ethereum::EthereumClient;
 use image::GenericImageView;
 #[cfg(target_os = "linux")]

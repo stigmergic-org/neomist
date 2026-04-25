@@ -40,6 +40,7 @@ use crate::config::{
 use crate::state::AppState;
 
 const HELIOS_RPC_ADDR: &str = "127.0.0.1:8545";
+const VERSION_TEXT: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
 
 const HELP_TEXT: &str = "NeoMist
 
@@ -47,12 +48,14 @@ Usage:
   neomist
   neomist system <install|uninstall> --yes
   neomist --help
+  neomist --version
 
 Commands:
   system            Manage NeoMist DNS, certificates, and CLI integration
 
 Options:
   -h, --help  Print help
+  -V, --version  Print version
 ";
 
 const SYSTEM_HELP_TEXT: &str = "Manage NeoMist system integration
@@ -101,6 +104,7 @@ Options:
 enum CliCommand {
     Run,
     ShowHelp(&'static str),
+    ShowVersion(&'static str),
     SystemInstall,
     SystemUninstall,
 }
@@ -116,6 +120,10 @@ fn main() -> Result<()> {
         CliCommand::Run => {}
         CliCommand::ShowHelp(help_text) => {
             println!("{help_text}");
+            return Ok(());
+        }
+        CliCommand::ShowVersion(version_text) => {
+            println!("{version_text}");
             return Ok(());
         }
         CliCommand::SystemInstall => return install_system(),
@@ -172,6 +180,16 @@ fn parse_cli_args(args: &[String]) -> Result<CliCommand> {
             } else {
                 Err(eyre::eyre!(
                     "Unexpected argument after help flag: `{}`\nRun `neomist --help` for usage.",
+                    args[1]
+                ))
+            }
+        }
+        "-V" | "--version" => {
+            if args.len() == 1 {
+                Ok(CliCommand::ShowVersion(VERSION_TEXT))
+            } else {
+                Err(eyre::eyre!(
+                    "Unexpected argument after version flag: `{}`\nRun `neomist --help` for usage.",
                     args[1]
                 ))
             }
@@ -244,6 +262,46 @@ fn parse_confirmed_subcommand(
     }
 
     Ok(ConfirmedCommand::Confirmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliCommand, VERSION_TEXT, parse_cli_args};
+
+    #[test]
+    fn parses_long_version_flag() {
+        let args = vec!["--version".to_string()];
+        let command = parse_cli_args(&args).expect("version flag should parse");
+
+        match command {
+            CliCommand::ShowVersion(version_text) => {
+                assert_eq!(version_text, VERSION_TEXT);
+            }
+            _ => panic!("expected version command"),
+        }
+    }
+
+    #[test]
+    fn parses_short_version_flag() {
+        let args = vec!["-V".to_string()];
+        let command = parse_cli_args(&args).expect("short version flag should parse");
+
+        match command {
+            CliCommand::ShowVersion(version_text) => assert_eq!(version_text, VERSION_TEXT),
+            _ => panic!("expected version command"),
+        }
+    }
+
+    #[test]
+    fn rejects_extra_argument_after_version_flag() {
+        let args = vec!["--version".to_string(), "extra".to_string()];
+        let error = parse_cli_args(&args).expect_err("extra arg after version flag should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Unexpected argument after version flag: `extra`\nRun `neomist --help` for usage."
+        );
+    }
 }
 
 fn init_services(
