@@ -105,6 +105,10 @@ function shortCid(value) {
   return `${value.slice(0, 10)}...${value.slice(-6)}`;
 }
 
+function isIpnsContenthash(value) {
+  return value?.protocol === 'ipns' && typeof value.target === 'string' && value.target.length > 0;
+}
+
 function decodeRouteSegment(value) {
   try {
     return decodeURIComponent(value);
@@ -1480,6 +1484,7 @@ function SeedingPage({
                   const active = detailDomain?.domain === domain.domain;
                   const latestCid = domain.versions?.[0]?.cid || '';
                   const latestProviderCount = latestCid ? providerCounts[latestCid] : null;
+                  const hasIpnsContenthash = isIpnsContenthash(domain.contenthash);
 
                   return (
                     <button
@@ -1502,9 +1507,18 @@ function SeedingPage({
                           </p>
                         </div>
 
-                        <StatusPill tone={domain.auto_seeding ? 'info' : 'neutral'}>
-                          {latestTrackingStatus(domain.auto_seeding)}
-                        </StatusPill>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          {hasIpnsContenthash ? (
+                            <StatusPill tone="warning">
+                              <WarningIcon className="mr-1 h-3.5 w-3.5" />
+                              IPNS
+                            </StatusPill>
+                          ) : null}
+
+                          <StatusPill tone={domain.auto_seeding ? 'info' : 'neutral'}>
+                            {latestTrackingStatus(domain.auto_seeding)}
+                          </StatusPill>
+                        </div>
                       </div>
 
                       <div className="mt-4">
@@ -1584,6 +1598,7 @@ function DomainDetailPanel({
   }
 
   const coverage = getCoverage(detailDomain.local_size, detailDomain.full_size);
+  const hasIpnsContenthash = isIpnsContenthash(detailDomain.contenthash);
   const isPreview = !routeDomain;
 
   return (
@@ -1593,6 +1608,12 @@ function DomainDetailPanel({
           <div className="flex items-center gap-2">
             {isPreview ? <StatusPill tone="neutral">Preview</StatusPill> : null}
             <StatusPill tone={coverage.tone}>{coverage.label}</StatusPill>
+            {hasIpnsContenthash ? (
+              <StatusPill tone="warning">
+                <WarningIcon className="mr-1 h-3.5 w-3.5" />
+                IPNS
+              </StatusPill>
+            ) : null}
             <StatusPill tone={detailDomain.auto_seeding ? 'info' : 'neutral'}>
               {latestTrackingStatus(detailDomain.auto_seeding)}
             </StatusPill>
@@ -1602,6 +1623,7 @@ function DomainDetailPanel({
           <p className="mt-3 text-sm leading-6 text-base-content/65">
             {formatBytes(detailDomain.local_size)} stored locally of {formatBytes(detailDomain.full_size)} total content.
           </p>
+
         </div>
 
         <div className="flex items-center gap-3">
@@ -1616,6 +1638,20 @@ function DomainDetailPanel({
           </a>
         </div>
       </div>
+
+      {hasIpnsContenthash ? (
+        <div className="mt-4 flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+          <WarningIcon className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">IPNS contenthash</p>
+            <p className="mt-1 break-all text-warning/85">
+              This ENS record resolves through IPNS name: <span className="font-mono">{detailDomain.contenthash.target}</span>.
+              <br/> 
+              App developer can change site content at will without another onchain transaction. Snapshot list shows pinned results from each visit.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-6 p-5')}>
         <div className="flex items-center justify-between gap-4 text-sm">
@@ -2359,6 +2395,20 @@ function SettingsIcon() {
         d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.527-.94 3.31.843 2.37 2.37a1.724 1.724 0 001.065 2.572c1.757.426 1.757 2.924 0 3.35a1.724 1.724 0 00-1.065 2.573c.94 1.527-.843 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.757-2.924 1.757-3.35 0a1.724 1.724 0 00-2.573-1.065c-1.527.94-3.31-.843-2.37-2.37a1.724 1.724 0 00-1.066-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.527.843-3.31 2.37-2.37.996.613 2.296.07 2.573-1.065z"
       />
       <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+  );
+}
+
+function WarningIcon({ className = 'h-4 w-4' }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className}>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+      />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 17h.01" />
     </svg>
   );
 }

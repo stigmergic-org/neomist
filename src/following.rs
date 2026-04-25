@@ -44,38 +44,35 @@ pub async fn run_following_loop(state: AppState, mut synced_rx: Receiver<()>) {
         for domain in followed_domains {
             info!("Following: checking {}", domain.domain);
             match ens::resolve_contenthash(&provider, &domain.domain).await {
-                Ok(Some(new_cid)) => {
-                    let mut needs_update = true;
-                    if let Ok(Some(latest_cid)) =
-                        ens::latest_cached_cid(&state, &domain.domain).await
+                Ok(Some(contenthash)) => {
+                    if let Err(err) =
+                        cache::write_contenthash_metadata(&state, &domain.domain, &contenthash).await
                     {
-                        if latest_cid == new_cid {
-                            needs_update = false;
-                        }
+                        warn!(
+                            "Following: failed to write contenthash metadata for {}: {err}",
+                            domain.domain
+                        );
                     }
 
-                    if needs_update {
-                        info!(
-                            "Following: updating {} to new CID {}",
-                            domain.domain, new_cid
-                        );
-                        if let Err(err) =
-                            ens::update_mfs_cache(&state, &domain.domain, &new_cid).await
-                        {
+                    match ens::update_mfs_cache(&state, &domain.domain, &contenthash).await {
+                        Ok(true) => {
+                            info!("Following: updating {} to {}", domain.domain, contenthash.target());
+                            if let Err(err) = ens::pin_content(&state, &contenthash).await {
+                                warn!(
+                                    "Following: failed to pin new content for {}: {err}",
+                                    domain.domain
+                                );
+                            }
+                        }
+                        Ok(false) => {
+                            info!("Following: {} is already up to date", domain.domain);
+                        }
+                        Err(err) => {
                             warn!(
                                 "Following: failed to update MFS cache for {}: {err}",
                                 domain.domain
                             );
-                            continue;
                         }
-                        if let Err(err) = ens::pin_cid(&state, &new_cid).await {
-                            warn!(
-                                "Following: failed to pin new CID for {}: {err}",
-                                domain.domain
-                            );
-                        }
-                    } else {
-                        info!("Following: {} is already up to date", domain.domain);
                     }
                 }
                 Ok(None) => {

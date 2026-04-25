@@ -5,6 +5,7 @@ use alloy::sol;
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header::HOST};
 use eyre::{Report, Result, WrapErr};
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use url::form_urlencoded;
@@ -50,6 +51,38 @@ const OFFLINE_LOOKUP_PATTERNS: &[&str] = &[
     "timeout",
 ];
 
+const IPFS_CODEC: u64 = 0xe3;
+const IPNS_CODEC: u64 = 0xe5;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "protocol", content = "target", rename_all = "lowercase")]
+pub enum ResolvedContenthash {
+    Ipfs(String),
+    Ipns(String),
+}
+
+impl ResolvedContenthash {
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Ipfs(target) | Self::Ipns(target) => target,
+        }
+    }
+
+    pub fn gateway_url(&self, gateway_port: u16, path: &str) -> String {
+        match self {
+            Self::Ipfs(cid) => format!("http://{cid}.ipfs.localhost:{gateway_port}{path}"),
+            Self::Ipns(name) => format!("http://127.0.0.1:{gateway_port}/ipns/{name}{path}"),
+        }
+    }
+
+    fn resolved_cid(&self) -> Option<&str> {
+        match self {
+            Self::Ipfs(cid) => Some(cid),
+            Self::Ipns(_) => None,
+        }
+    }
+}
+
 pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let host = parts
@@ -64,13 +97,13 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
     let path = parts.uri.path();
     let query = parts.uri.query();
 
-    let (cid, refresh_cache) = match resolve_contenthash(&state.ens_provider, ens_name).await {
-        Ok(Some(cid)) => (cid, true),
+    let (contenthash, refresh_cache) = match resolve_contenthash(&state.ens_provider, ens_name).await {
+        Ok(Some(contenthash)) => (contenthash, true),
         Ok(None) => {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header("content-type", "text/plain; charset=utf-8")
-                .body(Body::from("No IPFS contenthash found"))
+                .body(Body::from("No IPFS or IPNS contenthash found"))
                 .unwrap();
         }
         Err(err) => {
@@ -80,7 +113,7 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
                         warn!(
                             "ENS lookup failed for {ens_name} while offline, using cached CID {cid}: {err:?}"
                         );
-                        (cid, false)
+                        (ResolvedContenthash::Ipfs(cid), false)
                     }
                     Ok(None) => {
                         warn!(
@@ -102,14 +135,17 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
         }
     };
 
-    if refresh_cache && let Err(err) = update_mfs_cache(state, ens_name, &cid).await {
+    if refresh_cache
+        && let Err(err) = crate::cache::write_contenthash_metadata(state, ens_name, &contenthash).await
+    {
+        warn!("Contenthash metadata update failed for {ens_name}: {err}");
+    }
+
+    if refresh_cache && let Err(err) = update_mfs_cache(state, ens_name, &contenthash).await {
         warn!("MFS cache update failed for {ens_name}: {err}");
     }
 
-    let mut url = format!(
-        "http://{}.ipfs.localhost:{}{}",
-        cid, state.ipfs_gateway_port, path
-    );
+    let mut url = contenthash.gateway_url(state.ipfs_gateway_port, path);
     if let Some(query) = query {
         url.push('?');
         url.push_str(query);
@@ -182,30 +218,40 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 }
 
 pub async fn pin_cid(state: &AppState, cid: &str) -> Result<()> {
+    pin_content(state, &ResolvedContenthash::Ipfs(cid.to_string())).await
+}
+
+pub async fn pin_content(state: &AppState, contenthash: &ResolvedContenthash) -> Result<()> {
+    let pin_target = snapshot_ipfs_path(state, contenthash).await?;
     let pin_url = format!(
         "{}/api/v0/pin/add?arg={}",
         state.ipfs_api_url,
-        encode_arg(&format!("/ipfs/{cid}"))
+        encode_arg(&pin_target)
     );
     let response = state
         .http_client
         .post(pin_url)
         .send()
         .await
-        .wrap_err("Failed to pin CID")?;
+        .wrap_err("Failed to pin contenthash target")?;
     if !response.status().is_success() {
         return Err(eyre::eyre!("Pin failed with status {}", response.status()));
     }
     Ok(())
 }
 
-pub async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result<()> {
+pub async fn update_mfs_cache(
+    state: &AppState,
+    site: &str,
+    contenthash: &ResolvedContenthash,
+) -> Result<bool> {
     let base_path = cache_base_path(site);
+    let resolved_cid = snapshot_cid(state, contenthash).await?;
 
     let latest = latest_mfs_entry(state, &base_path).await?;
     if let Some((_timestamp, existing_cid)) = &latest {
-        if existing_cid == cid {
-            return Ok(());
+        if existing_cid == &resolved_cid {
+            return Ok(false);
         }
     }
 
@@ -225,7 +271,7 @@ pub async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result
     let copy_url = format!(
         "{}/api/v0/files/cp?arg={}&arg={}&parents=true",
         state.ipfs_api_url,
-        encode_arg(&format!("/ipfs/{cid}")),
+        encode_arg(&format!("/ipfs/{resolved_cid}")),
         encode_arg(&target)
     );
     let response = state
@@ -233,7 +279,7 @@ pub async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result
         .post(copy_url)
         .send()
         .await
-        .wrap_err("Failed to copy CID into MFS")?;
+        .wrap_err("Failed to copy contenthash target into MFS")?;
     if !response.status().is_success() {
         return Err(eyre::eyre!(
             "MFS copy failed with status {}",
@@ -241,7 +287,53 @@ pub async fn update_mfs_cache(state: &AppState, site: &str, cid: &str) -> Result
         ));
     }
 
-    Ok(())
+    Ok(true)
+}
+
+async fn snapshot_ipfs_path(state: &AppState, contenthash: &ResolvedContenthash) -> Result<String> {
+    Ok(format!("/ipfs/{}", snapshot_cid(state, contenthash).await?))
+}
+
+async fn snapshot_cid(state: &AppState, contenthash: &ResolvedContenthash) -> Result<String> {
+    match contenthash.resolved_cid() {
+        Some(cid) => Ok(cid.to_string()),
+        None => resolve_ipns_cid(state, contenthash.target()).await,
+    }
+}
+
+async fn resolve_ipns_cid(state: &AppState, name: &str) -> Result<String> {
+    let url = format!(
+        "{}/api/v0/name/resolve?arg={}&recursive=true",
+        state.ipfs_api_url,
+        encode_arg(&format!("/ipns/{name}"))
+    );
+    let response = state
+        .http_client
+        .post(url)
+        .send()
+        .await
+        .wrap_err("Failed to resolve IPNS target")?;
+    if !response.status().is_success() {
+        return Err(eyre::eyre!(
+            "IPNS resolve failed with status {}",
+            response.status()
+        ));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .wrap_err("Failed to parse IPNS resolve response")?;
+    let path = body
+        .get("Path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| eyre::eyre!("IPNS resolve response missing Path"))?;
+    let cid = path
+        .strip_prefix("/ipfs/")
+        .and_then(|value| value.split('/').next())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| eyre::eyre!("IPNS resolve response missing root CID"))?;
+    Ok(cid.to_string())
 }
 
 async fn latest_mfs_entry(state: &AppState, base_path: &str) -> Result<Option<(String, String)>> {
@@ -373,7 +465,18 @@ fn looks_like_offline_lookup_message(message: &str) -> bool {
         .any(|pattern| message.contains(pattern))
 }
 
-fn decode_ipfs_contenthash(bytes: &AlloyBytes) -> Option<String> {
+fn decode_contenthash(bytes: &AlloyBytes) -> Option<ResolvedContenthash> {
+    let (codec, index) = decode_varint(bytes)?;
+    let cid_bytes = &bytes[index..];
+    let cid = cid::Cid::try_from(cid_bytes).ok()?;
+    match codec {
+        IPFS_CODEC => Some(ResolvedContenthash::Ipfs(cid.to_string())),
+        IPNS_CODEC => Some(ResolvedContenthash::Ipns(cid.to_string())),
+        _ => None,
+    }
+}
+
+fn decode_varint(bytes: &AlloyBytes) -> Option<(u64, usize)> {
     if bytes.is_empty() {
         return None;
     }
@@ -400,24 +503,23 @@ fn decode_ipfs_contenthash(bytes: &AlloyBytes) -> Option<String> {
         return None;
     }
 
-    const IPFS_CODEC: u64 = 0xe3;
-    if value != IPFS_CODEC {
-        return None;
-    }
-
-    let cid_bytes = &bytes[index..];
-    let cid = cid::Cid::try_from(cid_bytes).ok()?;
-    Some(cid.to_string())
+    Some((value, index))
 }
 
-pub async fn resolve_contenthash(provider: &DynProvider, host: &str) -> Result<Option<String>> {
+pub async fn resolve_contenthash(
+    provider: &DynProvider,
+    host: &str,
+) -> Result<Option<ResolvedContenthash>> {
     if host.ends_with(".wei") {
-        return resolve_wei_ipfs(provider, host).await;
+        return resolve_wei_contenthash(provider, host).await;
     }
-    resolve_ens_ipfs(provider, host).await
+    resolve_ens_contenthash(provider, host).await
 }
 
-async fn resolve_ens_ipfs(provider: &DynProvider, ens_name: &str) -> Result<Option<String>> {
+async fn resolve_ens_contenthash(
+    provider: &DynProvider,
+    ens_name: &str,
+) -> Result<Option<ResolvedContenthash>> {
     let node: B256 = namehash(ens_name);
     let registry = EnsRegistry::new(ENS_ADDRESS, provider);
     let resolver_addr: Address = registry
@@ -437,10 +539,13 @@ async fn resolve_ens_ipfs(provider: &DynProvider, ens_name: &str) -> Result<Opti
         .await
         .wrap_err("Failed to resolve ENS contenthash")?;
 
-    Ok(decode_ipfs_contenthash(&contenthash))
+    Ok(decode_contenthash(&contenthash))
 }
 
-async fn resolve_wei_ipfs(provider: &DynProvider, host: &str) -> Result<Option<String>> {
+async fn resolve_wei_contenthash(
+    provider: &DynProvider,
+    host: &str,
+) -> Result<Option<ResolvedContenthash>> {
     let node = wei_namehash(host);
     let contract = WeiNameService::new(WEI_REGISTRY, provider);
     let contenthash = contract
@@ -449,7 +554,7 @@ async fn resolve_wei_ipfs(provider: &DynProvider, host: &str) -> Result<Option<S
         .await
         .wrap_err("Failed to resolve .wei contenthash")?;
 
-    Ok(decode_ipfs_contenthash(&contenthash))
+    Ok(decode_contenthash(&contenthash))
 }
 
 fn wei_namehash(name: &str) -> B256 {
@@ -487,7 +592,9 @@ fn wei_namehash(name: &str) -> B256 {
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_offline_lookup_message;
+    use super::{IPFS_CODEC, IPNS_CODEC, ResolvedContenthash, decode_contenthash, looks_like_offline_lookup_message};
+    use alloy::primitives::Bytes as AlloyBytes;
+    use cid::{Cid, multihash::{Code, MultihashDigest}};
 
     #[test]
     fn detects_network_unreachable_lookup_failures() {
@@ -507,5 +614,49 @@ mod tests {
         assert!(!looks_like_offline_lookup_message(
             "failed to resolve ENS contenthash: execution reverted"
         ));
+    }
+
+    #[test]
+    fn decodes_ipfs_contenthash() {
+        let cid = Cid::new_v1(0x70, Code::Sha2_256.digest(b"neomist-ipfs"));
+        let bytes = encode_contenthash(IPFS_CODEC, &cid);
+
+        assert_eq!(
+            decode_contenthash(&bytes),
+            Some(ResolvedContenthash::Ipfs(cid.to_string()))
+        );
+    }
+
+    #[test]
+    fn decodes_ipns_contenthash() {
+        let cid = Cid::new_v1(0x72, Code::Sha2_256.digest(b"neomist-ipns"));
+        let bytes = encode_contenthash(IPNS_CODEC, &cid);
+
+        assert_eq!(
+            decode_contenthash(&bytes),
+            Some(ResolvedContenthash::Ipns(cid.to_string()))
+        );
+    }
+
+    fn encode_contenthash(codec: u64, cid: &Cid) -> AlloyBytes {
+        let mut bytes = encode_varint(codec);
+        bytes.extend_from_slice(&cid.to_bytes());
+        AlloyBytes::from(bytes)
+    }
+
+    fn encode_varint(mut value: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        bytes
     }
 }

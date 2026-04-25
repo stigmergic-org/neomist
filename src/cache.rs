@@ -7,7 +7,10 @@ use tracing::warn;
 use url::form_urlencoded;
 
 use crate::constants::MFS_CACHE_DIR;
+use crate::ens::ResolvedContenthash;
 use crate::state::AppState;
+
+const CONTENTHASH_METADATA_FILE: &str = "contenthash";
 
 #[derive(Debug, Serialize)]
 pub struct CachedDomain {
@@ -16,6 +19,7 @@ pub struct CachedDomain {
     pub local_size: u64,
     pub full_size: u64,
     pub auto_seeding: bool,
+    pub contenthash: Option<ResolvedContenthash>,
     pub visit_url: String,
     pub versions: Vec<CachedVersion>,
 }
@@ -68,6 +72,7 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
             .first()
             .map(|version| version.cached_at.clone())
             .unwrap_or_default();
+        let contenthash = load_contenthash_metadata(state, &site).await;
         let visit_url = versions
             .first()
             .map(|version| version.visit_url.clone())
@@ -79,6 +84,7 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
             local_size,
             full_size,
             auto_seeding,
+            contenthash,
             visit_url,
             versions,
         });
@@ -199,7 +205,64 @@ pub async fn clear_cache(state: &AppState, domain: &str, version: Option<&str>) 
     if !response.status().is_success() {
         return Err(eyre::eyre!("Failed to remove cache"));
     }
+
     Ok(())
+}
+
+pub async fn write_contenthash_metadata(
+    state: &AppState,
+    site: &str,
+    contenthash: &ResolvedContenthash,
+) -> Result<()> {
+    let body = serde_json::to_string(contenthash).wrap_err("Failed to encode contenthash metadata")?;
+    let url = format!(
+        "{}/api/v0/files/write?arg={}&create=true&truncate=true&parents=true",
+        state.ipfs_api_url,
+        encode_arg(&contenthash_metadata_path(site))
+    );
+    let form = multipart::Form::new().part("data", multipart::Part::text(body));
+    let response = state
+        .http_client
+        .post(url)
+        .multipart(form)
+        .send()
+        .await
+        .wrap_err("Failed to write contenthash metadata")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(eyre::eyre!(
+            "Failed to write contenthash metadata (status {}): {}",
+            status,
+            body
+        ));
+    }
+
+    Ok(())
+}
+
+pub async fn read_contenthash_metadata(
+    state: &AppState,
+    site: &str,
+) -> Result<Option<ResolvedContenthash>> {
+    let url = format!(
+        "{}/api/v0/files/read?arg={}",
+        state.ipfs_api_url,
+        encode_arg(&contenthash_metadata_path(site))
+    );
+    let response = state.http_client.post(url).send().await;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let text = response.text().await.unwrap_or_default();
+    let contenthash = serde_json::from_str(&text).wrap_err("Failed to parse contenthash metadata")?;
+    Ok(Some(contenthash))
 }
 
 async fn list_site_versions(state: &AppState, site: &str) -> Result<Vec<CachedVersion>> {
@@ -208,7 +271,7 @@ async fn list_site_versions(state: &AppState, site: &str) -> Result<Vec<CachedVe
     let mut versions = Vec::new();
 
     for entry in entries {
-        if entry == "autoseed" {
+        if entry == "autoseed" || entry == CONTENTHASH_METADATA_FILE {
             continue;
         }
 
@@ -340,6 +403,18 @@ async fn mfs_stat_with_local(state: &AppState, path: &str) -> Result<MfsStat> {
 
 fn encode_arg(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+async fn load_contenthash_metadata(state: &AppState, site: &str) -> Option<ResolvedContenthash> {
+    match read_contenthash_metadata(state, site).await {
+        Ok(Some(contenthash)) => Some(contenthash),
+        Ok(None) | Err(_) => None,
+    }
+}
+
+fn contenthash_metadata_path(site: &str) -> String {
+    let safe_site = site.replace('/', "_");
+    format!("{MFS_CACHE_DIR}/{safe_site}/{CONTENTHASH_METADATA_FILE}")
 }
 
 fn timestamp_to_iso(ts: u64) -> Option<String> {
