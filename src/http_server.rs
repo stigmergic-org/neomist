@@ -6,8 +6,12 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{
-    HeaderMap, Request, Response, StatusCode,
-    header::{CACHE_CONTROL, CONTENT_TYPE, HOST, ORIGIN, REFERER},
+    HeaderMap, HeaderValue, Request, Response, StatusCode,
+    header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+        ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, CACHE_CONTROL, CONTENT_TYPE,
+        HOST, ORIGIN, REFERER, VARY,
+    },
 };
 use axum::response::{IntoResponse, Json};
 use axum::routing::{any, get, post};
@@ -71,7 +75,7 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         "Starting local-only HTTPS server for node.localhost, neomist.localhost, ipfs.localhost, and *.ipfs.localhost"
     );
     let eth_router = Router::new()
-        .route("/rpc", post(proxy_rpc))
+        .route("/rpc", post(proxy_rpc).options(proxy_rpc_preflight))
         .route("/health", get(healthcheck))
         .route("/api/about", get(get_about))
         .route("/api/cached-domains", get(get_cached_domains))
@@ -229,11 +233,7 @@ async fn run_https_listener(
                                     .body(Body::from("IPFS gateway routing error"))
                                     .unwrap()),
                             }
-                        } else if host_only.ends_with(".eth.localhost")
-                            || host_only.ends_with(".wei.localhost")
-                            || host_only.ends_with(".eth")
-                            || host_only.ends_with(".wei")
-                        {
+                        } else if is_ens_host(host_only) {
                             match ens_router.oneshot(req).await {
                                 Ok(resp) => Ok::<_, Infallible>(resp),
                                 Err(_) => Ok(Response::builder()
@@ -288,7 +288,15 @@ fn request_origin_matches_neomist_ui(headers: &HeaderMap) -> bool {
     false
 }
 
-fn url_header_matches_neomist_ui(value: &axum::http::HeaderValue) -> bool {
+fn url_header_matches_neomist_ui(value: &HeaderValue) -> bool {
+    url_header_matches_host(value, is_neomist_ui_host)
+}
+
+fn url_header_matches_rpc_origin(value: &HeaderValue) -> bool {
+    url_header_matches_host(value, is_allowed_rpc_origin_host)
+}
+
+fn url_header_matches_host(value: &HeaderValue, host_matches: fn(&str) -> bool) -> bool {
     let raw = match value.to_str() {
         Ok(raw) => raw,
         Err(_) => return false,
@@ -299,10 +307,15 @@ fn url_header_matches_neomist_ui(value: &axum::http::HeaderValue) -> bool {
     };
 
     parsed.scheme() == "https"
-        && parsed
-            .host_str()
-            .map(|host| host.eq_ignore_ascii_case(NEOMIST_UI_HOST))
-            .unwrap_or(false)
+        && parsed.host_str().map(host_matches).unwrap_or(false)
+}
+
+fn is_neomist_ui_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case(NEOMIST_UI_HOST)
+}
+
+fn is_allowed_rpc_origin_host(host: &str) -> bool {
+    is_neomist_ui_host(host) || is_ens_host(host)
 }
 
 async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
@@ -751,6 +764,13 @@ fn host_without_port(host: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
+fn is_ens_host(host: &str) -> bool {
+    host.ends_with(".eth.localhost")
+        || host.ends_with(".wei.localhost")
+        || host.ends_with(".eth")
+        || host.ends_with(".wei")
+}
+
 fn is_ipfs_gateway_host(host: &str) -> bool {
     let Some(prefix) = host.strip_suffix(".ipfs.localhost") else {
         return false;
@@ -773,43 +793,161 @@ fn ipfs_proxy_client() -> Option<&'static reqwest::Client> {
 
 async fn proxy_rpc(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body_bytes: Bytes,
-) -> Result<Response<Body>, StatusCode> {
-    let response = state
+) -> Response<Body> {
+    let cors_origin = match rpc_cors_origin(&headers) {
+        Ok(cors_origin) => cors_origin,
+        Err(response) => return response,
+    };
+
+    let response = match state
         .http_client
         .post(&state.helios_rpc_url)
         .header("content-type", "application/json")
         .body(body_bytes)
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return build_rpc_response(
+                StatusCode::BAD_GATEWAY,
+                Body::from("Failed to reach local Helios RPC"),
+                None,
+                cors_origin.as_ref(),
+            );
+        }
+    };
 
     let status = response.status();
     let content_type = response
         .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
+        .get(CONTENT_TYPE)
+        .cloned();
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return build_rpc_response(
+                StatusCode::BAD_GATEWAY,
+                Body::from("Failed to read local Helios RPC response"),
+                None,
+                cors_origin.as_ref(),
+            );
+        }
+    };
 
     let mut builder = Response::builder().status(status);
     if let Some(content_type) = content_type {
-        builder = builder.header("content-type", content_type);
+        builder = builder.header(CONTENT_TYPE, content_type);
     }
 
-    builder
-        .body(Body::from(bytes))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    let Ok(mut response) = builder.body(Body::from(bytes)) else {
+        return build_rpc_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Body::from("Failed to build RPC response"),
+            None,
+            cors_origin.as_ref(),
+        );
+    };
+
+    if let Some(origin) = cors_origin.as_ref() {
+        add_rpc_cors_headers(response.headers_mut(), origin);
+    }
+
+    response
+}
+
+async fn proxy_rpc_preflight(headers: HeaderMap) -> Response<Body> {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Forbidden"))
+            .unwrap();
+    };
+
+    if !url_header_matches_rpc_origin(origin) {
+        return Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Forbidden"))
+            .unwrap();
+    }
+
+    let mut response = Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap();
+    let response_headers = response.headers_mut();
+    add_rpc_cors_headers(response_headers, origin);
+    response_headers.insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+
+    if let Some(request_headers) = headers.get(ACCESS_CONTROL_REQUEST_HEADERS) {
+        response_headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, request_headers.clone());
+        response_headers.append(VARY, HeaderValue::from_static("Access-Control-Request-Headers"));
+    } else {
+        response_headers.insert(
+            ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("content-type"),
+        );
+    }
+
+    response
+}
+
+fn rpc_cors_origin(headers: &HeaderMap) -> std::result::Result<Option<HeaderValue>, Response<Body>> {
+    let Some(origin) = headers.get(ORIGIN) else {
+        return Ok(None);
+    };
+
+    if url_header_matches_rpc_origin(origin) {
+        Ok(Some(origin.clone()))
+    } else {
+        Err(Response::builder()
+            .status(StatusCode::FORBIDDEN)
+            .body(Body::from("Forbidden"))
+            .unwrap())
+    }
+}
+
+fn add_rpc_cors_headers(headers: &mut HeaderMap, origin: &HeaderValue) {
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+    headers.append(VARY, HeaderValue::from_static("Origin"));
+}
+
+fn build_rpc_response(
+    status: StatusCode,
+    body: Body,
+    content_type: Option<HeaderValue>,
+    cors_origin: Option<&HeaderValue>,
+) -> Response<Body> {
+    let mut builder = Response::builder().status(status);
+    if let Some(content_type) = content_type {
+        builder = builder.header(CONTENT_TYPE, content_type);
+    }
+
+    let mut response = builder.body(body).unwrap_or_else(|_| {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::empty())
+            .unwrap()
+    });
+
+    if let Some(origin) = cors_origin {
+        add_rpc_cors_headers(response.headers_mut(), origin);
+    }
+
+    response
 }
 
 #[cfg(test)]
 mod tests {
     use super::is_loopback_peer;
     use super::request_origin_matches_neomist_ui;
+    use super::url_header_matches_rpc_origin;
     use axum::http::{
         HeaderMap, HeaderValue,
         header::{ORIGIN, REFERER},
@@ -855,6 +993,20 @@ mod tests {
         );
 
         assert!(request_origin_matches_neomist_ui(&headers));
+    }
+
+    #[test]
+    fn accepts_eth_origin_for_rpc() {
+        assert!(url_header_matches_rpc_origin(&HeaderValue::from_static(
+            "https://evmnow.eth",
+        )));
+    }
+
+    #[test]
+    fn accepts_eth_localhost_origin_for_rpc() {
+        assert!(url_header_matches_rpc_origin(&HeaderValue::from_static(
+            "https://evmnow.eth.localhost",
+        )));
     }
 
     #[test]
