@@ -319,9 +319,9 @@ fn init_services(
     let config = load_or_create_config(&config_path)?;
     let config = app_setup::prepare_runtime_setup(config, &config_path, &data_dir)?;
     tray_state.set_show_gas_price(config.show_tray_gas_price);
+    info!("Helios enabled: {}", config.helios_enabled);
     info!("Consensus RPCs: {:?}", config.consensus_rpcs);
     info!("Execution RPCs: {:?}", config.execution_rpcs);
-    let data_dir_for_helios = data_dir.clone();
 
     let cert_manager = CertManager::new(&data_dir);
 
@@ -339,15 +339,27 @@ fn init_services(
     let kubo_manager = Arc::new(kubo_manager);
     tray_state.set_kubo_manager(kubo_manager.clone());
 
+    // In direct mode, the ENS provider and the /rpc proxy both talk straight to the
+    // user's execution node. In Helios mode they talk to Helios at HELIOS_RPC_ADDR.
+    let rpc_url = if config.helios_enabled {
+        format!("http://{HELIOS_RPC_ADDR}")
+    } else {
+        config
+            .execution_rpcs
+            .first()
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("helios_enabled is false but no execution_rpcs configured"))?
+    };
+
     let ens_provider = ProviderBuilder::new()
-        .connect_http(Url::parse(&format!("http://{HELIOS_RPC_ADDR}"))?)
+        .connect_http(Url::parse(&rpc_url)?)
         .erased();
 
     let state = AppState {
         config: Arc::new(tokio::sync::RwLock::new(config.clone())),
         config_path: config_path.clone(),
         tray_state: tray_state.clone(),
-        helios_rpc_url: format!("http://{HELIOS_RPC_ADDR}"),
+        helios_rpc_url: rpc_url,
         ens_provider: Arc::new(ens_provider),
         http_client: http_client.clone(),
         managed_ipfs: kubo_manager.is_managed(),
@@ -356,28 +368,34 @@ fn init_services(
         checkpoint_history,
     };
 
-    let proxy_port = runtime
-        .block_on(rpc_proxy::run_internal_proxy(state.clone()))
-        .wrap_err("Failed to start internal RPC proxy")?;
+    let helios_opt = if config.helios_enabled {
+        let proxy_port = runtime
+            .block_on(rpc_proxy::run_internal_proxy(state.clone()))
+            .wrap_err("Failed to start internal RPC proxy")?;
 
-    info!("Init: building Helios client");
-    let helios_client: EthereumClient = runtime
-        .block_on(async {
-            EthereumClientBuilder::new()
-                .network(Network::Mainnet)
-                .consensus_rpc(format!("http://127.0.0.1:{proxy_port}/consensus"))?
-                .execution_rpc(format!("http://127.0.0.1:{proxy_port}/execution"))?
-                .load_external_fallback()
-                .data_dir(data_dir_for_helios)
-                .rpc_address(HELIOS_RPC_ADDR.parse()?)
-                .with_file_db()
-                .build()
-        })
-        .wrap_err("Failed to build Helios client")?;
-    info!("Init: Helios client ready");
+        info!("Init: building Helios client");
+        let helios_client: EthereumClient = runtime
+            .block_on(async {
+                EthereumClientBuilder::new()
+                    .network(Network::Mainnet)
+                    .consensus_rpc(format!("http://127.0.0.1:{proxy_port}/consensus"))?
+                    .execution_rpc(format!("http://127.0.0.1:{proxy_port}/execution"))?
+                    .load_external_fallback()
+                    .data_dir(data_dir.clone())
+                    .rpc_address(HELIOS_RPC_ADDR.parse()?)
+                    .with_file_db()
+                    .build()
+            })
+            .wrap_err("Failed to build Helios client")?;
+        info!("Init: Helios client ready");
 
-    let helios_client = Arc::new(helios_client);
-    tray_state.set_helios_client(helios_client.clone());
+        let helios_client = Arc::new(helios_client);
+        tray_state.set_helios_client(helios_client.clone());
+        Some(helios_client)
+    } else {
+        info!("Init: Helios disabled; ENS resolves directly against execution RPC");
+        None
+    };
 
     let dns_port = dns::dns_port()?;
     info!("Init: starting DNS server on 127.0.0.1:{dns_port}");
@@ -421,18 +439,23 @@ fn init_services(
 
     let (sync_tx, sync_rx) = tokio::sync::mpsc::channel(1);
 
-    info!("Init: starting Helios sync monitor");
-    handle.spawn({
-        let client = helios_client.clone();
-        async move {
-            if let Err(err) = client.wait_synced().await {
-                warn!("Helios sync wait failed: {err}");
-            } else {
-                info!("Helios synced");
-                let _ = sync_tx.send(()).await;
-            }
+    match helios_opt {
+        Some(helios_client) => {
+            info!("Init: starting Helios sync monitor");
+            handle.spawn(async move {
+                if let Err(err) = helios_client.wait_synced().await {
+                    warn!("Helios sync wait failed: {err}");
+                } else {
+                    info!("Helios synced");
+                    let _ = sync_tx.send(()).await;
+                }
+            });
         }
-    });
+        None => {
+            info!("Init: Helios disabled; following loop will start immediately");
+            let _ = sync_tx.try_send(());
+        }
+    }
 
     info!("Init: installing Ctrl+C handler");
     handle.spawn({

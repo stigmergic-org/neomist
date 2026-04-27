@@ -38,10 +38,16 @@ pub struct AppConfig {
     pub dns_setup_attempted: bool,
     #[serde(default)]
     pub dns_setup_installed: bool,
+    #[serde(default = "default_helios_enabled")]
+    pub helios_enabled: bool,
 }
 
 fn default_following_interval() -> u64 {
     30
+}
+
+fn default_helios_enabled() -> bool {
+    true
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -107,6 +113,7 @@ fn default_config() -> AppConfig {
         start_on_login: false,
         dns_setup_attempted: false,
         dns_setup_installed: false,
+        helios_enabled: true,
     }
 }
 
