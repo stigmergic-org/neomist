@@ -32,6 +32,7 @@ use crate::cache;
 use crate::certs::CertManager;
 use crate::config::{AppConfig, save_config};
 use crate::ens;
+use crate::site_error;
 use crate::state::AppState;
 
 const PRIMARY_HTTPS_PORT: u16 = 443;
@@ -68,6 +69,13 @@ struct KuboVersion {
 struct IpfsVersionResponse {
     #[serde(rename = "Version")]
     version: String,
+}
+
+struct ProxySiteErrorContext {
+    host: String,
+    path: String,
+    title: &'static str,
+    summary: &'static str,
 }
 
 pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager>) -> Result<()> {
@@ -201,6 +209,8 @@ async fn run_https_listener(
 
                     async move {
                         let req = req.map(Body::new);
+                        let wants_html_error_page = site_error::prefers_html_error_page(req.headers());
+                        let request_path = req.uri().path().to_string();
                         let host = req
                             .headers()
                             .get(HOST)
@@ -228,18 +238,28 @@ async fn run_https_listener(
                         } else if is_ipfs_gateway_host(host_only) {
                             match ipfs_gateway_router.oneshot(req).await {
                                 Ok(resp) => Ok::<_, Infallible>(resp),
-                                Err(_) => Ok(Response::builder()
-                                    .status(StatusCode::BAD_GATEWAY)
-                                    .body(Body::from("IPFS gateway routing error"))
-                                    .unwrap()),
+                                Err(_) => Ok(site_error::build_site_error_response(
+                                    StatusCode::BAD_GATEWAY,
+                                    wants_html_error_page,
+                                    "Gateway routing failed",
+                                    "NeoMist could not route this IPFS request to local Kubo gateway.",
+                                    Some("IPFS gateway routing error"),
+                                    host_only,
+                                    &request_path,
+                                )),
                             }
                         } else if is_ens_host(host_only) {
                             match ens_router.oneshot(req).await {
                                 Ok(resp) => Ok::<_, Infallible>(resp),
-                                Err(_) => Ok(Response::builder()
-                                    .status(StatusCode::BAD_GATEWAY)
-                                    .body(Body::from("ENS routing error"))
-                                    .unwrap()),
+                                Err(_) => Ok(site_error::build_site_error_response(
+                                    StatusCode::BAD_GATEWAY,
+                                    wants_html_error_page,
+                                    "Content routing failed",
+                                    "NeoMist could not route this .eth or .wei request to local content loader.",
+                                    Some("ENS routing error"),
+                                    host_only,
+                                    &request_path,
+                                )),
                             }
                         } else {
                             Ok(Response::builder()
@@ -641,6 +661,7 @@ async fn proxy_ipfs_api(State(state): State<AppState>, request: Request<Body>) -
         url,
         "IPFS request failed",
         "IPFS response failed",
+        None,
     )
     .await
 }
@@ -657,11 +678,12 @@ async fn proxy_ipfs_gateway(
         .unwrap_or("")
         .to_lowercase();
     let host_only = host_without_port(&host);
+    let request_path = parts.uri.path().to_string();
 
     let mut url = format!(
         "http://{host_only}:{}{}",
         state.ipfs_gateway_port,
-        parts.uri.path()
+        request_path
     );
     if let Some(query) = parts.uri.query() {
         url.push('?');
@@ -674,6 +696,12 @@ async fn proxy_ipfs_gateway(
         url,
         "IPFS gateway request failed",
         "IPFS gateway response failed",
+        Some(ProxySiteErrorContext {
+            host: host_only.to_string(),
+            path: request_path,
+            title: "Content load failed",
+            summary: "NeoMist could not load content from local Kubo gateway.",
+        }),
     )
     .await
 }
@@ -684,7 +712,12 @@ async fn proxy_ipfs_request(
     url: String,
     request_error: &'static str,
     response_error: &'static str,
+    error_page: Option<ProxySiteErrorContext>,
 ) -> Response<Body> {
+    let wants_html_error_page = error_page
+        .as_ref()
+        .map(|_| site_error::prefers_html_error_page(&parts.headers))
+        .unwrap_or(false);
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -698,10 +731,13 @@ async fn proxy_ipfs_request(
     let proxy_client = match ipfs_proxy_client() {
         Some(client) => client,
         None => {
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from("IPFS proxy client unavailable"))
-                .unwrap();
+            return build_proxy_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "IPFS proxy client unavailable",
+                error_page.as_ref(),
+                wants_html_error_page,
+                Some("IPFS proxy client unavailable"),
+            );
         }
     };
 
@@ -725,17 +761,28 @@ async fn proxy_ipfs_request(
 
     let upstream = match req_builder.body(body_bytes).send().await {
         Ok(resp) => resp,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from(request_error))
-                .unwrap();
+        Err(err) => {
+            let detail = format!("{request_error}: {err}");
+            return build_proxy_error_response(
+                StatusCode::BAD_GATEWAY,
+                request_error,
+                error_page.as_ref(),
+                wants_html_error_page,
+                Some(&detail),
+            );
         }
     };
 
     let status = upstream.status();
-    let mut builder = Response::builder().status(status);
-    for (name, value) in upstream.headers().iter() {
+    let upstream_content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let upstream_headers = upstream
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
         let name_str = name.as_str();
         if name_str.eq_ignore_ascii_case("connection")
             || name_str.eq_ignore_ascii_case("keep-alive")
@@ -746,18 +793,98 @@ async fn proxy_ipfs_request(
             || name_str.eq_ignore_ascii_case("transfer-encoding")
             || name_str.eq_ignore_ascii_case("upgrade")
         {
-            continue;
+            return None;
         }
-        builder = builder.header(name, value);
-    }
+        Some((name.clone(), value.clone()))
+    })
+        .collect::<Vec<_>>();
 
     match upstream.bytes().await {
-        Ok(bytes) => builder.body(Body::from(bytes)).unwrap(),
-        Err(_) => Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .body(Body::from(response_error))
-            .unwrap(),
+        Ok(bytes) => {
+            if wants_html_error_page && (status.is_client_error() || status.is_server_error()) {
+                let detail = site_error::summarize_error_detail(upstream_content_type.as_deref(), &bytes)
+                    .or_else(|| Some(status.to_string()));
+                let (title, summary) = ipfs_gateway_error_copy(status);
+                let error_page_override = error_page.as_ref().map(|error_page| ProxySiteErrorContext {
+                    host: error_page.host.clone(),
+                    path: error_page.path.clone(),
+                    title,
+                    summary,
+                });
+                return build_proxy_error_response(
+                    status,
+                    response_error,
+                    error_page_override.as_ref(),
+                    true,
+                    detail.as_deref(),
+                );
+            }
+
+            let mut builder = Response::builder().status(status);
+            for (name, value) in upstream_headers {
+                builder = builder.header(name, value);
+            }
+            builder.body(Body::from(bytes)).unwrap()
+        }
+        Err(err) => {
+            let detail = format!("{response_error}: {err}");
+            build_proxy_error_response(
+                StatusCode::BAD_GATEWAY,
+                response_error,
+                error_page.as_ref(),
+                wants_html_error_page,
+                Some(&detail),
+            )
+        }
     }
+}
+
+fn ipfs_gateway_error_copy(status: StatusCode) -> (&'static str, &'static str) {
+    if status == StatusCode::NOT_FOUND {
+        (
+            "Page not found",
+            "Requested IPFS path was not found in content served through local Kubo gateway.",
+        )
+    } else if status.is_server_error() {
+        (
+            "Kubo gateway error",
+            "Local Kubo gateway failed before requested IPFS content could load.",
+        )
+    } else {
+        (
+            "Content load failed",
+            "Requested IPFS content could not be loaded from local Kubo gateway.",
+        )
+    }
+}
+
+fn build_proxy_error_response(
+    status: StatusCode,
+    fallback_message: &'static str,
+    error_page: Option<&ProxySiteErrorContext>,
+    wants_html_error_page: bool,
+    detail: Option<&str>,
+) -> Response<Body> {
+    if let Some(error_page) = error_page.filter(|_| wants_html_error_page) {
+        return site_error::build_site_error_response(
+            status,
+            true,
+            error_page.title,
+            error_page.summary,
+            detail,
+            &error_page.host,
+            &error_page.path,
+        );
+    }
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(
+            detail.unwrap_or(fallback_message).to_string(),
+        ))
+        .unwrap()
 }
 
 fn host_without_port(host: &str) -> &str {

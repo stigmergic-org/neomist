@@ -15,6 +15,7 @@ mod gas;
 mod http_server;
 mod ipfs;
 mod rpc_proxy;
+mod site_error;
 mod state;
 mod tray;
 

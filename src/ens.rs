@@ -11,6 +11,7 @@ use tracing::warn;
 use url::form_urlencoded;
 
 use crate::constants::MFS_CACHE_DIR;
+use crate::site_error;
 use crate::state::AppState;
 
 sol! {
@@ -83,6 +84,14 @@ impl ResolvedContenthash {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContenthashRecord {
+    Missing,
+    Supported(ResolvedContenthash),
+    UnsupportedCodec(u64),
+    Invalid(&'static str),
+}
+
 pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let host = parts
@@ -96,15 +105,46 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 
     let path = parts.uri.path();
     let query = parts.uri.query();
+    let wants_html_error_page = site_error::prefers_html_error_page(&parts.headers);
 
-    let (contenthash, refresh_cache) = match resolve_contenthash(&state.ens_provider, ens_name).await {
-        Ok(Some(contenthash)) => (contenthash, true),
-        Ok(None) => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header("content-type", "text/plain; charset=utf-8")
-                .body(Body::from("No IPFS or IPNS contenthash found"))
-                .unwrap();
+    let (contenthash, refresh_cache) = match resolve_contenthash_record(&state.ens_provider, ens_name).await {
+        Ok(ContenthashRecord::Supported(contenthash)) => (contenthash, true),
+        Ok(ContenthashRecord::Missing) => {
+            return site_error::build_site_error_response(
+                StatusCode::NOT_FOUND,
+                wants_html_error_page,
+                "No contenthash record",
+                "This domain does not have an IPFS or IPNS contenthash record, so NeoMist has no site content to load.",
+                Some("Resolver returned no contenthash for this name."),
+                ens_name,
+                path,
+            );
+        }
+        Ok(ContenthashRecord::UnsupportedCodec(codec)) => {
+            let detail = format!(
+                "Unsupported contenthash codec 0x{codec:x}. NeoMist currently supports only IPFS and IPNS contenthash records."
+            );
+            return site_error::build_site_error_response(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Unsupported contenthash",
+                "This domain uses unsupported contenthash protocol. NeoMist supports only IPFS and IPNS contenthash records.",
+                Some(&detail),
+                ens_name,
+                path,
+            );
+        }
+        Ok(ContenthashRecord::Invalid(reason)) => {
+            let detail = format!("Contenthash record is malformed: {reason}");
+            return site_error::build_site_error_response(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Invalid contenthash record",
+                "This domain has contenthash record, but resolver returned malformed data.",
+                Some(&detail),
+                ens_name,
+                path,
+            );
         }
         Err(err) => {
             if is_offline_lookup_error(&err) {
@@ -119,18 +159,38 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
                         warn!(
                             "ENS lookup failed for {ens_name} while offline and no cached record is available: {err:?}"
                         );
-                        return ens_lookup_failed_response();
+                        let detail = format!("Failed to resolve contenthash while offline: {err:#}");
+                        return ens_lookup_failed_response(
+                            ens_name,
+                            path,
+                            wants_html_error_page,
+                            Some(&detail),
+                        );
                     }
                     Err(cache_err) => {
                         warn!(
                             "ENS lookup failed for {ens_name} and cached fallback lookup failed: {err:?}; cache error: {cache_err:?}"
                         );
-                        return ens_lookup_failed_response();
+                        let detail = format!(
+                            "Failed to resolve contenthash while offline: {err:#}. Cached fallback also failed: {cache_err:#}"
+                        );
+                        return ens_lookup_failed_response(
+                            ens_name,
+                            path,
+                            wants_html_error_page,
+                            Some(&detail),
+                        );
                     }
                 }
             } else {
                 warn!("ENS lookup failed for {ens_name}: {err:?}");
-                return ens_lookup_failed_response();
+                let detail = format!("{err:#}");
+                return ens_lookup_failed_response(
+                    ens_name,
+                    path,
+                    wants_html_error_page,
+                    Some(&detail),
+                );
             }
         }
     };
@@ -182,17 +242,30 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 
     let upstream = match req_builder.body(body_bytes).send().await {
         Ok(resp) => resp,
-        Err(_) => {
-            return Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(Body::from("IPFS gateway request failed"))
-                .unwrap();
+        Err(err) => {
+            let detail = format!("IPFS gateway request failed: {err}");
+            return site_error::build_site_error_response(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Content load failed",
+                "NeoMist resolved this domain but could not load content from local Kubo gateway.",
+                Some(&detail),
+                ens_name,
+                path,
+            );
         }
     };
 
     let status = upstream.status();
-    let mut builder = Response::builder().status(status);
-    for (name, value) in upstream.headers().iter() {
+    let upstream_content_type = upstream
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let upstream_headers = upstream
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
         let name_str = name.as_str();
         if name_str.eq_ignore_ascii_case("connection")
             || name_str.eq_ignore_ascii_case("keep-alive")
@@ -203,17 +276,47 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
             || name_str.eq_ignore_ascii_case("transfer-encoding")
             || name_str.eq_ignore_ascii_case("upgrade")
         {
-            continue;
+            return None;
         }
-        builder = builder.header(name, value);
-    }
+        Some((name.clone(), value.clone()))
+    })
+        .collect::<Vec<_>>();
 
     match upstream.bytes().await {
-        Ok(bytes) => builder.body(Body::from(bytes)).unwrap(),
-        Err(_) => Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .body(Body::from("IPFS gateway response failed"))
-            .unwrap(),
+        Ok(bytes) => {
+            if wants_html_error_page && (status.is_client_error() || status.is_server_error()) {
+                let detail = site_error::summarize_error_detail(upstream_content_type.as_deref(), &bytes)
+                    .or_else(|| Some(status.to_string()));
+                let (title, summary) = ens_gateway_error_copy(status);
+                return site_error::build_site_error_response(
+                    status,
+                    true,
+                    title,
+                    summary,
+                    detail.as_deref(),
+                    ens_name,
+                    path,
+                );
+            }
+
+            let mut builder = Response::builder().status(status);
+            for (name, value) in upstream_headers {
+                builder = builder.header(name, value);
+            }
+            builder.body(Body::from(bytes)).unwrap()
+        }
+        Err(err) => {
+            let detail = format!("IPFS gateway response failed: {err}");
+            site_error::build_site_error_response(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Content load failed",
+                "NeoMist resolved this domain but could not read response from local Kubo gateway.",
+                Some(&detail),
+                ens_name,
+                path,
+            )
+        }
     }
 }
 
@@ -445,12 +548,40 @@ fn cache_base_path(site: &str) -> String {
     format!("{MFS_CACHE_DIR}/{safe_site}")
 }
 
-fn ens_lookup_failed_response() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::BAD_GATEWAY)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(Body::from("ENS lookup failed"))
-        .unwrap()
+fn ens_lookup_failed_response(
+    ens_name: &str,
+    path: &str,
+    wants_html_error_page: bool,
+    detail: Option<&str>,
+) -> Response<Body> {
+    site_error::build_site_error_response(
+        StatusCode::BAD_GATEWAY,
+        wants_html_error_page,
+        "Name lookup failed",
+        "NeoMist could not resolve contenthash for this .eth or .wei domain.",
+        detail.or(Some("ENS lookup failed")),
+        ens_name,
+        path,
+    )
+}
+
+fn ens_gateway_error_copy(status: StatusCode) -> (&'static str, &'static str) {
+    if status == StatusCode::NOT_FOUND {
+        (
+            "Page not found",
+            "Domain resolved, but requested path was not found in site content served through local Kubo gateway.",
+        )
+    } else if status.is_server_error() {
+        (
+            "Kubo gateway error",
+            "NeoMist resolved this domain, but local Kubo gateway failed before site content could load.",
+        )
+    } else {
+        (
+            "Content load failed",
+            "NeoMist resolved this domain, but local Kubo gateway returned an error before site could load.",
+        )
+    }
 }
 
 fn is_offline_lookup_error(err: &Report) -> bool {
@@ -466,14 +597,48 @@ fn looks_like_offline_lookup_message(message: &str) -> bool {
 }
 
 fn decode_contenthash(bytes: &AlloyBytes) -> Option<ResolvedContenthash> {
-    let (codec, index) = decode_varint(bytes)?;
-    let cid_bytes = &bytes[index..];
-    let cid = cid::Cid::try_from(cid_bytes).ok()?;
-    match codec {
-        IPFS_CODEC => Some(ResolvedContenthash::Ipfs(cid.to_string())),
-        IPNS_CODEC => Some(ResolvedContenthash::Ipns(cid.to_string())),
-        _ => None,
+    match inspect_contenthash(bytes) {
+        ContenthashRecord::Supported(contenthash) => Some(contenthash),
+        ContenthashRecord::Missing
+        | ContenthashRecord::UnsupportedCodec(_)
+        | ContenthashRecord::Invalid(_) => None,
     }
+}
+
+fn inspect_contenthash(bytes: &AlloyBytes) -> ContenthashRecord {
+    if bytes.is_empty() {
+        return ContenthashRecord::Missing;
+    }
+
+    let Some((codec, index)) = decode_varint(bytes) else {
+        return ContenthashRecord::Invalid("could not decode contenthash prefix");
+    };
+
+    match codec {
+        IPFS_CODEC | IPNS_CODEC => {
+            let cid_bytes = &bytes[index..];
+            let Ok(cid) = cid::Cid::try_from(cid_bytes) else {
+                return ContenthashRecord::Invalid("payload is not valid CID data");
+            };
+
+            match codec {
+                IPFS_CODEC => ContenthashRecord::Supported(ResolvedContenthash::Ipfs(cid.to_string())),
+                IPNS_CODEC => ContenthashRecord::Supported(ResolvedContenthash::Ipns(cid.to_string())),
+                _ => unreachable!(),
+            }
+        }
+        _ => ContenthashRecord::UnsupportedCodec(codec),
+    }
+}
+
+async fn resolve_contenthash_record(
+    provider: &DynProvider,
+    host: &str,
+) -> Result<ContenthashRecord> {
+    if host.ends_with(".wei") {
+        return resolve_wei_contenthash_record(provider, host).await;
+    }
+    resolve_ens_contenthash_record(provider, host).await
 }
 
 fn decode_varint(bytes: &AlloyBytes) -> Option<(u64, usize)> {
@@ -510,16 +675,18 @@ pub async fn resolve_contenthash(
     provider: &DynProvider,
     host: &str,
 ) -> Result<Option<ResolvedContenthash>> {
-    if host.ends_with(".wei") {
-        return resolve_wei_contenthash(provider, host).await;
-    }
-    resolve_ens_contenthash(provider, host).await
+    Ok(match resolve_contenthash_record(provider, host).await? {
+        ContenthashRecord::Supported(contenthash) => Some(contenthash),
+        ContenthashRecord::Missing
+        | ContenthashRecord::UnsupportedCodec(_)
+        | ContenthashRecord::Invalid(_) => None,
+    })
 }
 
-async fn resolve_ens_contenthash(
+async fn resolve_ens_contenthash_record(
     provider: &DynProvider,
     ens_name: &str,
-) -> Result<Option<ResolvedContenthash>> {
+) -> Result<ContenthashRecord> {
     let node: B256 = namehash(ens_name);
     let registry = EnsRegistry::new(ENS_ADDRESS, provider);
     let resolver_addr: Address = registry
@@ -529,7 +696,7 @@ async fn resolve_ens_contenthash(
         .wrap_err("Failed to resolve ENS resolver address")?;
 
     if resolver_addr == Address::ZERO {
-        return Ok(None);
+        return Ok(ContenthashRecord::Missing);
     }
 
     let resolver = EnsResolver::new(resolver_addr, provider);
@@ -539,13 +706,13 @@ async fn resolve_ens_contenthash(
         .await
         .wrap_err("Failed to resolve ENS contenthash")?;
 
-    Ok(decode_contenthash(&contenthash))
+    Ok(inspect_contenthash(&contenthash))
 }
 
-async fn resolve_wei_contenthash(
+async fn resolve_wei_contenthash_record(
     provider: &DynProvider,
     host: &str,
-) -> Result<Option<ResolvedContenthash>> {
+) -> Result<ContenthashRecord> {
     let node = wei_namehash(host);
     let contract = WeiNameService::new(WEI_REGISTRY, provider);
     let contenthash = contract
@@ -554,7 +721,7 @@ async fn resolve_wei_contenthash(
         .await
         .wrap_err("Failed to resolve .wei contenthash")?;
 
-    Ok(decode_contenthash(&contenthash))
+    Ok(inspect_contenthash(&contenthash))
 }
 
 fn wei_namehash(name: &str) -> B256 {
@@ -592,7 +759,10 @@ fn wei_namehash(name: &str) -> B256 {
 
 #[cfg(test)]
 mod tests {
-    use super::{IPFS_CODEC, IPNS_CODEC, ResolvedContenthash, decode_contenthash, looks_like_offline_lookup_message};
+    use super::{
+        ContenthashRecord, IPFS_CODEC, IPNS_CODEC, ResolvedContenthash, decode_contenthash,
+        inspect_contenthash, looks_like_offline_lookup_message,
+    };
     use alloy::primitives::Bytes as AlloyBytes;
     use cid::{Cid, multihash::{Code, MultihashDigest}};
 
@@ -635,6 +805,25 @@ mod tests {
         assert_eq!(
             decode_contenthash(&bytes),
             Some(ResolvedContenthash::Ipns(cid.to_string()))
+        );
+    }
+
+    #[test]
+    fn reports_unsupported_contenthash_codec() {
+        let cid = Cid::new_v1(0x70, Code::Sha2_256.digest(b"neomist-swarm"));
+        let bytes = encode_contenthash(0xe4, &cid);
+
+        assert_eq!(inspect_contenthash(&bytes), ContenthashRecord::UnsupportedCodec(0xe4));
+    }
+
+    #[test]
+    fn reports_invalid_supported_contenthash_payload() {
+        let mut bytes = encode_varint(IPFS_CODEC);
+        bytes.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+        assert_eq!(
+            inspect_contenthash(&AlloyBytes::from(bytes)),
+            ContenthashRecord::Invalid("payload is not valid CID data")
         );
     }
 
