@@ -6,6 +6,7 @@
 - `dist/neomist-<version>-linux-arm64.deb`
 - `dist/neomist-<version>-linux-x86_64.AppImage`
 - `dist/neomist-<version>-linux-arm64.AppImage`
+- `dist/neomist-<version>-linux-x86_64.pkg.tar.zst`
 
 Current Linux app ID / desktop ID: `eth.neomist.app`
 
@@ -35,6 +36,14 @@ Notes:
 - Script supports host-native `x86_64` and `aarch64` AppImage builds.
 - Script downloads `linuxdeploy` tools into `dist/tools/` when missing.
 - AppImage is secondary convenience build.
-- AppImage dependency handling is partial by design: `linuxdeploy` bundles shared libraries for supported architectures and script explicitly bundles `libayatana-appindicator`, but host tools like `pkexec`, `setcap`, `systemctl`, `update-ca-certificates`, and `xdg-open` still come from target system.
+- AppImage dependency handling is partial by design: `linuxdeploy` bundles shared libraries for supported architectures and script explicitly bundles `libayatana-appindicator`, but host tools like `pkexec`, `setcap`, `systemctl`, distro CA refresh tooling, and `xdg-open` still come from target system.
 - Cross-arch AppImage from this arm64 host is not wired yet. That path needs x86_64 sysroot/toolchain plus emulation or containerized packaging.
 - NeoMist's current Linux setup still uses stable executable path for `setcap` and autostart. Raw AppImage runs usually execute from temporary read-only mount paths, so AppImage path still has integration caveats that `.deb` avoids.
+
+## Build Arch Package
+
+```bash
+scripts/build-arch.sh --local
+```
+
+More Arch packaging details live in `packaging/arch/README.md`.

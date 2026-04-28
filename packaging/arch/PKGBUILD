@@ -1,0 +1,60 @@
+# Maintainer: NeoMist <packaging@localhost>
+
+pkgname=neomist
+pkgver=0.5.2
+pkgrel=1
+pkgdesc='Local-first desktop app for .eth and .wei sites'
+arch=('x86_64')
+url='https://github.com/1001-digital/neomist'
+license=('custom:proprietary')
+options=('!lto')
+depends=(
+  'ca-certificates-utils'
+  'gcc-libs'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'libayatana-appindicator'
+  'libcap'
+  'openssl'
+  'polkit'
+  'systemd'
+  'xdg-utils'
+  'zstd'
+)
+makedepends=(
+  'cargo'
+  'cmake'
+  'git'
+  'npm'
+  'pkgconf'
+)
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+
+  npm ci --prefix ui
+  npm run --prefix ui build
+  export OPENSSL_NO_VENDOR=1
+  export OPENSSL_DIR=/usr
+  export OPENSSL_LIB_DIR=/usr/lib
+  export OPENSSL_INCLUDE_DIR=/usr/include
+  export ZSTD_SYS_USE_PKG_CONFIG=1
+  cargo build --release --locked
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+
+  install -Dm0755 "target/release/neomist" "${pkgdir}/usr/bin/neomist"
+  install -Dm0644 "packaging/linux/eth.neomist.app.desktop" \
+    "${pkgdir}/usr/share/applications/eth.neomist.app.desktop"
+  install -Dm0644 "packaging/linux/eth.neomist.app.metainfo.xml" \
+    "${pkgdir}/usr/share/metainfo/eth.neomist.app.metainfo.xml"
+  install -Dm0644 "assets/icon.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/eth.neomist.app.svg"
+  install -Dm0644 "assets/icon.png" \
+    "${pkgdir}/usr/share/icons/hicolor/512x512/apps/eth.neomist.app.png"
+}

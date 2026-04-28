@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 use sha1::{Digest, Sha1};
 use tracing::warn;
 
-use crate::constants::{CA_CERT_DIR, CA_CERT_PREFIX};
+use crate::constants::CA_CERT_PREFIX;
 
 const ROOT_COMMON_NAME: &str = "NeoMist Root CA";
 const INTERMEDIATE_ETH_COMMON_NAME: &str = "NeoMist Intermediate CA (ETH)";
@@ -34,12 +34,45 @@ const NEOMIST_USER_HOME_ENV: &str = "NEOMIST_USER_HOME";
 const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
 const FIREFOX_POLICIES_PATH: &str = "/etc/firefox/policies/policies.json";
 const FIREFOX_POLICY_DEVICE_NAME: &str = "NeoMist System Trust";
+const DEBIAN_CA_CERT_DIR: &str = "/usr/local/share/ca-certificates";
+const ARCH_CA_CERT_DIR: &str = "/etc/ca-certificates/trust-source/anchors";
+const COMMON_SYSTEM_COMMAND_DIRS: &[&str] = &[
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+];
 const CERT_DIR_MODE: u32 = 0o700;
 const PRIVATE_KEY_MODE: u32 = 0o600;
 const CERT_FILE_MODE: u32 = 0o644;
 const CERT_SCHEMA_VERSION: &str = "2";
 
 static SERIAL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxCaStoreDefinition {
+    cert_dir: &'static str,
+    refresh_command: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxCaStore {
+    cert_dir: &'static str,
+    refresh_command: String,
+}
+
+const LINUX_CA_STORE_DEFINITIONS: &[LinuxCaStoreDefinition] = &[
+    LinuxCaStoreDefinition {
+        cert_dir: DEBIAN_CA_CERT_DIR,
+        refresh_command: "update-ca-certificates",
+    },
+    LinuxCaStoreDefinition {
+        cert_dir: ARCH_CA_CERT_DIR,
+        refresh_command: "update-ca-trust",
+    },
+];
 
 #[derive(Debug)]
 pub struct CertManager {
@@ -536,23 +569,27 @@ fn install_root_macos_system(cert_path: &Path) -> Result<()> {
 }
 
 fn install_root_linux(cert_path: &Path) -> Result<()> {
+    let ca_store = linux_ca_store()?;
     if current_user_is_root()? {
-        return install_root_linux_noninteractive(cert_path);
+        return install_root_linux_noninteractive_with_store(cert_path, &ca_store);
     }
 
     let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
-    let ca_file = format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt");
+    let ca_file = linux_ca_file_for_fingerprint(&ca_store, &fingerprint);
     let firefox_policy = render_linux_firefox_policy_with_neomist(
         existing_linux_firefox_policy()?.as_deref(),
         &ca_file,
     )?;
     let temp_policy_path = write_linux_firefox_policy_tempfile(&firefox_policy)?;
     let script = format!(
-        "mkdir -p {CA_CERT_DIR} /etc/firefox/policies && rm -f {CA_CERT_DIR}/{CA_CERT_PREFIX}-*.crt && cp {} {} && install -m 0644 {} {} && update-ca-certificates",
+        "mkdir -p {} /etc/firefox/policies && {} && cp {} {} && install -m 0644 {} {} && {}",
+        shell_quote_str(ca_store.cert_dir),
+        linux_ca_cleanup_shell_fragment(),
         shell_quote_path(cert_path),
         shell_quote_str(&ca_file),
         shell_quote_path(&temp_policy_path),
         shell_quote_str(FIREFOX_POLICIES_PATH),
+        shell_quote_str(&ca_store.refresh_command),
     );
     let status = Command::new("pkexec")
         .arg("/bin/sh")
@@ -568,15 +605,18 @@ fn install_root_linux(cert_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_root_linux_noninteractive(cert_path: &Path) -> Result<()> {
+fn install_root_linux_noninteractive_with_store(
+    cert_path: &Path,
+    ca_store: &LinuxCaStore,
+) -> Result<()> {
     let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
-    let ca_file = PathBuf::from(format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt"));
+    let ca_file = PathBuf::from(linux_ca_file_for_fingerprint(ca_store, &fingerprint));
     let firefox_policy = render_linux_firefox_policy_with_neomist(
         existing_linux_firefox_policy()?.as_deref(),
         &ca_file.to_string_lossy(),
     )?;
 
-    fs::create_dir_all(CA_CERT_DIR).wrap_err("Failed to create CA certificate directory")?;
+    fs::create_dir_all(ca_store.cert_dir).wrap_err("Failed to create CA certificate directory")?;
     fs::create_dir_all("/etc/firefox/policies")
         .wrap_err("Failed to create Firefox policies directory")?;
     remove_neomist_ca_files()?;
@@ -587,7 +627,7 @@ fn install_root_linux_noninteractive(cert_path: &Path) -> Result<()> {
         .wrap_err("Failed to write Firefox policies")?;
     set_path_mode(Path::new(FIREFOX_POLICIES_PATH), CERT_FILE_MODE)
         .wrap_err("Failed to secure Firefox policies")?;
-    refresh_linux_ca_store()?;
+    refresh_linux_ca_store(ca_store)?;
     Ok(())
 }
 
@@ -605,8 +645,9 @@ fn is_root_installed_linux(cert_path: &Path) -> Result<bool> {
     if !cert_path.exists() {
         return Ok(false);
     }
+    let ca_store = linux_ca_store()?;
     let fingerprint = cert_fingerprint_sha1(cert_path)?.to_lowercase();
-    let ca_file = format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-{fingerprint}.crt");
+    let ca_file = linux_ca_file_for_fingerprint(&ca_store, &fingerprint);
     if !Path::new(&ca_file).exists() {
         return Ok(false);
     }
@@ -727,8 +768,9 @@ fn keychain_contains_common_name(keychain: &str, common_name: &str) -> Result<bo
 }
 
 fn uninstall_linux(data_dir: &Path) -> Result<()> {
+    let ca_store = linux_ca_store()?;
     if current_user_is_root()? {
-        return uninstall_linux_noninteractive(data_dir);
+        return uninstall_linux_noninteractive_with_store(data_dir, &ca_store);
     }
 
     let existing_policy = existing_linux_firefox_policy()?;
@@ -748,7 +790,9 @@ fn uninstall_linux(data_dir: &Path) -> Result<()> {
         format!("rm -f {}", shell_quote_str(FIREFOX_POLICIES_PATH))
     };
     let script = format!(
-        "rm -f {CA_CERT_DIR}/{CA_CERT_PREFIX}-*.crt && {policy_command} && update-ca-certificates"
+        "{} && {policy_command} && {}",
+        linux_ca_cleanup_shell_fragment(),
+        shell_quote_str(&ca_store.refresh_command),
     );
     let status = Command::new("pkexec")
         .arg("/bin/sh")
@@ -769,7 +813,10 @@ fn uninstall_linux(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn uninstall_linux_noninteractive(data_dir: &Path) -> Result<()> {
+fn uninstall_linux_noninteractive_with_store(
+    data_dir: &Path,
+    ca_store: &LinuxCaStore,
+) -> Result<()> {
     let existing_policy = existing_linux_firefox_policy()?;
     let updated_policy = render_linux_firefox_policy_without_neomist(existing_policy.as_deref())?;
 
@@ -786,7 +833,7 @@ fn uninstall_linux_noninteractive(data_dir: &Path) -> Result<()> {
     }
 
     remove_neomist_ca_files()?;
-    refresh_linux_ca_store()?;
+    refresh_linux_ca_store(ca_store)?;
     cleanup_cert_files(data_dir)?;
     Ok(())
 }
@@ -800,27 +847,29 @@ fn cleanup_cert_files(data_dir: &Path) -> Result<()> {
 }
 
 fn remove_neomist_ca_files() -> Result<()> {
-    let ca_dir = Path::new(CA_CERT_DIR);
-    if !ca_dir.exists() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(ca_dir).wrap_err("Failed to read CA certificate directory")? {
-        let entry = entry.wrap_err("Failed to inspect CA certificate entry")?;
-        let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+    for ca_store in LINUX_CA_STORE_DEFINITIONS {
+        let ca_dir = Path::new(ca_store.cert_dir);
+        if !ca_dir.exists() {
             continue;
-        };
-        if file_name.starts_with(&format!("{CA_CERT_PREFIX}-")) && file_name.ends_with(".crt") {
-            remove_file_if_exists(&path)?;
+        }
+
+        for entry in fs::read_dir(ca_dir).wrap_err("Failed to read CA certificate directory")? {
+            let entry = entry.wrap_err("Failed to inspect CA certificate entry")?;
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.starts_with(&format!("{CA_CERT_PREFIX}-")) && file_name.ends_with(".crt") {
+                remove_file_if_exists(&path)?;
+            }
         }
     }
 
     Ok(())
 }
 
-fn refresh_linux_ca_store() -> Result<()> {
-    let status = Command::new("update-ca-certificates")
+fn refresh_linux_ca_store(ca_store: &LinuxCaStore) -> Result<()> {
+    let status = Command::new(&ca_store.refresh_command)
         .status()
         .wrap_err("Failed to refresh system CA certificates")?;
 
@@ -829,6 +878,59 @@ fn refresh_linux_ca_store() -> Result<()> {
     } else {
         Err(eyre::eyre!("System CA certificate refresh failed"))
     }
+}
+
+fn linux_ca_store() -> Result<LinuxCaStore> {
+    linux_ca_store_for_command_resolver(resolve_command_path)
+}
+
+fn linux_ca_store_for_command_resolver(
+    mut resolve_command: impl FnMut(&str) -> Option<String>,
+) -> Result<LinuxCaStore> {
+    for definition in LINUX_CA_STORE_DEFINITIONS {
+        if let Some(refresh_command) = resolve_command(definition.refresh_command) {
+            return Ok(LinuxCaStore {
+                cert_dir: definition.cert_dir,
+                refresh_command,
+            });
+        }
+    }
+
+    Err(eyre::eyre!(
+        "No supported Linux CA trust refresh command found. Install ca-certificates on Debian/Ubuntu or ca-certificates-utils on Arch."
+    ))
+}
+
+fn resolve_command_path(command: &str) -> Option<String> {
+    let mut search_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    search_dirs.extend(COMMON_SYSTEM_COMMAND_DIRS.iter().map(PathBuf::from));
+
+    search_dirs
+        .into_iter()
+        .map(|dir| dir.join(command))
+        .find(|path| is_executable_file(path))
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+fn linux_ca_file_for_fingerprint(ca_store: &LinuxCaStore, fingerprint: &str) -> String {
+    format!("{}/{CA_CERT_PREFIX}-{fingerprint}.crt", ca_store.cert_dir)
+}
+
+fn linux_ca_cleanup_shell_fragment() -> String {
+    let patterns = LINUX_CA_STORE_DEFINITIONS
+        .iter()
+        .map(|ca_store| format!("{}/{CA_CERT_PREFIX}-*.crt", ca_store.cert_dir))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("rm -f {patterns}")
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {
@@ -903,8 +1005,10 @@ fn cert_fingerprint_sha1(cert_path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FIREFOX_POLICY_DEVICE_NAME, linux_firefox_policy_has_neomist_cert,
-        render_linux_firefox_policy_with_neomist, render_linux_firefox_policy_without_neomist,
+        ARCH_CA_CERT_DIR, DEBIAN_CA_CERT_DIR, FIREFOX_POLICY_DEVICE_NAME,
+        is_neomist_firefox_certificate_policy_entry, linux_ca_store_for_command_resolver,
+        linux_firefox_policy_has_neomist_cert, render_linux_firefox_policy_with_neomist,
+        render_linux_firefox_policy_without_neomist,
     };
 
     #[test]
@@ -991,6 +1095,44 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn linux_ca_store_prefers_debian_refresh_command() {
+        let store = linux_ca_store_for_command_resolver(|command| match command {
+            "update-ca-certificates" => Some("/usr/sbin/update-ca-certificates".to_string()),
+            "update-ca-trust" => Some("/usr/bin/update-ca-trust".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(store.cert_dir, DEBIAN_CA_CERT_DIR);
+        assert_eq!(store.refresh_command, "/usr/sbin/update-ca-certificates");
+    }
+
+    #[test]
+    fn linux_ca_store_supports_arch_refresh_command() {
+        let store = linux_ca_store_for_command_resolver(|command| match command {
+            "update-ca-trust" => Some("/usr/bin/update-ca-trust".to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        assert_eq!(store.cert_dir, ARCH_CA_CERT_DIR);
+        assert_eq!(store.refresh_command, "/usr/bin/update-ca-trust");
+    }
+
+    #[test]
+    fn firefox_policy_cleanup_matches_debian_and_arch_ca_paths() {
+        assert!(is_neomist_firefox_certificate_policy_entry(
+            "/usr/local/share/ca-certificates/neomist-ca-current.crt"
+        ));
+        assert!(is_neomist_firefox_certificate_policy_entry(
+            "/etc/ca-certificates/trust-source/anchors/neomist-ca-current.crt"
+        ));
+        assert!(!is_neomist_firefox_certificate_policy_entry(
+            "/opt/acme/neomist-ca-current.crt"
+        ));
     }
 }
 
@@ -1155,7 +1297,10 @@ fn parse_linux_firefox_policy(existing: &str) -> Result<Value> {
 }
 
 fn is_neomist_firefox_certificate_policy_entry(path: &str) -> bool {
-    path.starts_with(&format!("{CA_CERT_DIR}/{CA_CERT_PREFIX}-")) && path.ends_with(".crt")
+    LINUX_CA_STORE_DEFINITIONS.iter().any(|ca_store| {
+        path.starts_with(&format!("{}/{CA_CERT_PREFIX}-", ca_store.cert_dir))
+            && path.ends_with(".crt")
+    })
 }
 
 fn linux_p11_kit_trust_path() -> Option<&'static str> {
