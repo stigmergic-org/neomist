@@ -10,6 +10,18 @@ const NEOMIST_NODE_MARKER_CID = 'bafkqaddomvxw22ltoqww433emu';
 const RECENT_STORAGE_KEY = 'neomist.recent-domains';
 const MAX_RECENT_DOMAINS = 8;
 const CHECKPOINT_ICON_SIZE = 32;
+const CHECKPOINT_EMOJI_COUNT = 5;
+const CHECKPOINT_EMOJI_ALPHABET = [
+  '😀', '😁', '😂', '😃', '😄', '😅', '😆', '😉', '😊', '😋', '😌', '😍', '😎', '😏', '😐', '😒',
+  '😓', '😔', '😕', '😖', '😘', '😚', '😜', '😝', '😞', '😠', '😢', '😣', '😤', '😨', '😭', '😴',
+  '🐶', '🐱', '🐭', '🐹', '🐰', '🐻', '🐼', '🐨', '🐯', '🐮', '🐷', '🐽', '🐸', '🐵', '🙈', '🙉',
+  '🙊', '🐒', '🐔', '🐧', '🐦', '🐤', '🐣', '🐥', '🐺', '🐗', '🐴', '🐝', '🐛', '🐌', '🐞', '🐢',
+  '🍎', '🍐', '🍊', '🍋', '🍌', '🍉', '🍇', '🍓', '🍒', '🍑', '🍍', '🍅', '🍆', '🌽', '🍄', '🌰',
+  '🌷', '🌸', '🌹', '🌺', '🌻', '🌼', '🌿', '🍀', '🍁', '🍂', '🍃', '🌵', '🌴', '🌲', '🌳', '🌱',
+  '🎈', '🎉', '🎁', '🎀', '🎂', '🎃', '🎄', '🎆', '🎇', '🎐', '🎨', '🎭', '🎪', '🎯', '🎲', '🎳',
+  '🎵', '🎶', '🎷', '🎸', '🎹', '🎺', '🎻', '🎬', '🎮', '🎰', '🚗', '🚕', '🚙', '🚌', '🚲', '🚀',
+];
+const CHECKPOINT_TEXT_ENCODER = new TextEncoder();
 const FOAM_PALETTE_OVERRIDES = {
   '--color-base-content': 'oklch(var(--bc))',
   '--color-primary': 'oklch(var(--p))',
@@ -42,17 +54,51 @@ function classNames(...values) {
   return values.filter(Boolean).join(' ');
 }
 
+function checkpointBytes(hash) {
+  if (typeof hash !== 'string' || hash.length === 0) {
+    return null;
+  }
+
+  const normalized = hash.startsWith('0x') ? hash.slice(2) : hash;
+  if (normalized.length > 0 && normalized.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(normalized)) {
+    const bytes = new Uint8Array(normalized.length / 2);
+    for (let index = 0; index < normalized.length; index += 2) {
+      bytes[index / 2] = Number.parseInt(normalized.slice(index, index + 2), 16);
+    }
+    return bytes;
+  }
+
+  return CHECKPOINT_TEXT_ENCODER.encode(hash);
+}
+
 function formatCheckpoint(hash) {
-  if (typeof hash !== 'string') {
+  const bytes = checkpointBytes(hash);
+  if (!bytes || bytes.length === 0) {
     return '';
   }
-  if (hash.startsWith('0x') && hash.length > 14) {
-    return `${hash.slice(0, 10)}...${hash.slice(-6)}`;
+
+  const symbols = [];
+  let byteIndex = 0;
+  let bitBuffer = 0;
+  let bitCount = 0;
+
+  while (symbols.length < CHECKPOINT_EMOJI_COUNT) {
+    while (bitCount < 7) {
+      bitBuffer = bitBuffer * 256 + bytes[byteIndex % bytes.length];
+      bitCount += 8;
+      byteIndex += 1;
+    }
+
+    const shift = bitCount - 7;
+    const divisor = 2 ** shift;
+    const alphabetIndex = Math.floor(bitBuffer / divisor);
+
+    symbols.push(CHECKPOINT_EMOJI_ALPHABET[alphabetIndex]);
+    bitBuffer -= alphabetIndex * divisor;
+    bitCount = shift;
   }
-  if (hash.length > 12) {
-    return `${hash.slice(0, 8)}...${hash.slice(-4)}`;
-  }
-  return hash;
+
+  return symbols.join(' ');
 }
 
 function formatBytes(value) {
@@ -990,7 +1036,7 @@ function HomePage({
           </h1>
 
           <p className="mt-5 max-w-2xl text-base leading-7 text-base-content/70">
-            Type a .eth, .wei, or `web3://`, URL and press
+            Type a .eth, .wei, or `web3://` URL and press
             Enter. NeoMist resolves content locally, including onchain web3 sites served straight
             from mainnet contracts.
           </p>
@@ -1255,6 +1301,7 @@ function CheckpointPanel({ checkpoints, error }) {
     () =>
       checkpoints.slice(0, 5).map((hash) => ({
         hash,
+        fingerprint: formatCheckpoint(hash),
         svg: generateFoamSvg(hash, CHECKPOINT_ICON_SIZE, {
           paletteOverrides: FOAM_PALETTE_OVERRIDES,
         }),
@@ -1275,12 +1322,14 @@ function CheckpointPanel({ checkpoints, error }) {
         ) : checkpoints.length === 0 ? (
           <p className="text-sm leading-6 text-base-content/60">Waiting for checkpoints.</p>
         ) : (
-          checkpointIcons.map(({ hash, svg }) => (
+          checkpointIcons.map(({ hash, fingerprint, svg }) => (
             <a
               key={hash}
               href={checkpointExplorerUrl(hash)}
               target="_blank"
               rel="noreferrer"
+              aria-label={`Open checkpoint ${hash} in explorer`}
+              title={hash}
               className={classNames(
                 SUBTLE_PANEL_CLASS,
                 'flex items-center justify-between gap-4 px-4 py-3 text-left transition hover:border-base-content/15 hover:bg-base-100/80'
@@ -1295,7 +1344,7 @@ function CheckpointPanel({ checkpoints, error }) {
                     dangerouslySetInnerHTML={{ __html: svg }}
                   />
                 </span>
-                <span className="font-mono text-sm">{formatCheckpoint(hash)}</span>
+                <span className="text-xl leading-none sm:text-2xl">{fingerprint}</span>
               </div>
               <span className="text-xs text-base-content/55">Open explorer</span>
             </a>
