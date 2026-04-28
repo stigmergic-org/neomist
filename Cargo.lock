@@ -5869,6 +5869,7 @@ dependencies = [
  "include_dir",
  "libappindicator",
  "mime_guess",
+ "percent-encoding",
  "rcgen",
  "reqwest",
  "rustls 0.23.36",

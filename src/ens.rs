@@ -22,11 +22,13 @@ sol! {
 
     #[sol(rpc)]
     interface EnsResolver {
+        function addr(bytes32 node) view returns (address);
         function contenthash(bytes32 node) view returns (bytes);
     }
 
     #[sol(rpc)]
     contract WeiNameService {
+        function addr(bytes32 node) view returns (address);
         function contenthash(bytes32 node) view returns (bytes);
     }
 }
@@ -684,6 +686,13 @@ pub async fn resolve_contenthash(
     })
 }
 
+pub async fn resolve_address(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
+    if host.ends_with(".wei") {
+        return resolve_wei_address(provider, host).await;
+    }
+    resolve_ens_address(provider, host).await
+}
+
 async fn resolve_ens_contenthash_record(
     provider: &DynProvider,
     ens_name: &str,
@@ -710,6 +719,29 @@ async fn resolve_ens_contenthash_record(
     Ok(inspect_contenthash(&contenthash))
 }
 
+async fn resolve_ens_address(provider: &DynProvider, ens_name: &str) -> Result<Option<Address>> {
+    let node: B256 = namehash(ens_name);
+    let registry = EnsRegistry::new(ENS_ADDRESS, provider);
+    let resolver_addr: Address = registry
+        .resolver(node)
+        .call()
+        .await
+        .wrap_err("Failed to resolve ENS resolver address")?;
+
+    if resolver_addr == Address::ZERO {
+        return Ok(None);
+    }
+
+    let resolver = EnsResolver::new(resolver_addr, provider);
+    let address = resolver
+        .addr(node)
+        .call()
+        .await
+        .wrap_err("Failed to resolve ENS address")?;
+
+    Ok((address != Address::ZERO).then_some(address))
+}
+
 async fn resolve_wei_contenthash_record(
     provider: &DynProvider,
     host: &str,
@@ -723,6 +755,18 @@ async fn resolve_wei_contenthash_record(
         .wrap_err("Failed to resolve .wei contenthash")?;
 
     Ok(inspect_contenthash(&contenthash))
+}
+
+async fn resolve_wei_address(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
+    let node = wei_namehash(host);
+    let contract = WeiNameService::new(WEI_REGISTRY, provider);
+    let address = contract
+        .addr(node)
+        .call()
+        .await
+        .wrap_err("Failed to resolve .wei address")?;
+
+    Ok((address != Address::ZERO).then_some(address))
 }
 
 fn wei_namehash(name: &str) -> B256 {

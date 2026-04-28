@@ -18,6 +18,7 @@ image = "0.25"
 base64 = "0.22"
 include_dir = "0.7"
 mime_guess = "2.0"
+percent-encoding = "2.3"
 hyper = "1.6"
 hyper-util = "0.1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"] }

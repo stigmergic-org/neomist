@@ -18,6 +18,7 @@ mod rpc_proxy;
 mod site_error;
 mod state;
 mod tray;
+mod web3;
 
 use std::collections::VecDeque;
 use std::env;

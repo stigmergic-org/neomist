@@ -157,10 +157,34 @@ function toRecentDisplay(url) {
   return suffix === '/' ? host : `${host}${suffix}`;
 }
 
+function isContractAddress(value) {
+  return /^0x[0-9a-fA-F]{40}$/.test(value);
+}
+
+function buildWeb3GatewayUrl(target) {
+  return `https://neomist.localhost/web3/${encodeURIComponent(target)}`;
+}
+
 function normalizeDappInput(value) {
   const trimmed = value.trim();
   if (!trimmed) {
-    return { ok: false, error: 'Enter a .eth or .wei domain.' };
+    return { ok: false, error: 'Enter .eth, .wei, 0x address, or web3:// / web+web3:// URL.' };
+  }
+
+  if (isContractAddress(trimmed)) {
+    return {
+      ok: true,
+      url: `https://neomist.localhost/web3/${trimmed}/`,
+      recentValue: `web3://${trimmed}/`,
+    };
+  }
+
+  if (/^(?:web3|web\+web3):\/\//i.test(trimmed)) {
+    return {
+      ok: true,
+      url: buildWeb3GatewayUrl(trimmed),
+      recentValue: trimmed,
+    };
   }
 
   const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
@@ -171,11 +195,11 @@ function normalizeDappInput(value) {
   try {
     url = new URL(candidate);
   } catch {
-    return { ok: false, error: 'Enter a valid .eth or .wei domain.' };
+    return { ok: false, error: 'Enter valid .eth, .wei, 0x address, or web3:// / web+web3:// URL.' };
   }
 
   if (!isSupportedDappHost(url.hostname)) {
-    return { ok: false, error: 'Only .eth and .wei domains are supported.' };
+    return { ok: false, error: 'Only .eth, .wei, 0x address, web3://, and web+web3:// targets are supported.' };
   }
 
   url.protocol = 'https:';
@@ -592,6 +616,25 @@ function App() {
   const seedingSummary = useMemo(() => buildSeedingSummary(domains), [domains]);
 
   useEffect(() => {
+    if (window.location.protocol !== 'https:') {
+      return;
+    }
+    if (typeof navigator.registerProtocolHandler !== 'function') {
+      return;
+    }
+
+    try {
+      navigator.registerProtocolHandler(
+        'web+web3',
+        'https://neomist.localhost/web3/%s',
+        'NeoMist'
+      );
+    } catch {
+      // Browser can reject duplicate or unsupported registrations.
+    }
+  }, []);
+
+  useEffect(() => {
     if (route.page === 'home') {
       document.title = 'NeoMist';
       return;
@@ -947,8 +990,9 @@ function HomePage({
           </h1>
 
           <p className="mt-5 max-w-2xl text-base leading-7 text-base-content/70">
-            Type a .eth or .wei domain and press Enter. NeoMist bypasses centralized gateways by
-            resolving everything locally, giving you true, trustless access to dapps.
+            Type a .eth, .wei, or `web3://`, URL and press
+            Enter. NeoMist resolves content locally, including onchain web3 sites served straight
+            from mainnet contracts.
           </p>
 
           <form onSubmit={handleSubmit} className="relative mt-10 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]" ref={containerRef}>
@@ -982,8 +1026,8 @@ function HomePage({
                   }
                 }}
                 className={INPUT_CLASS}
-                placeholder="app.eth or app.wei"
-                aria-label="Dapp domain"
+                placeholder="app.eth, app.wei, or web3://..."
+                aria-label="Dapp target"
                 autoComplete="off"
                 spellCheck="false"
               />

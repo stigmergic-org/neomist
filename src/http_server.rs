@@ -34,6 +34,7 @@ use crate::config::{AppConfig, save_config};
 use crate::ens;
 use crate::site_error;
 use crate::state::AppState;
+use crate::web3;
 
 const PRIMARY_HTTPS_PORT: u16 = 443;
 const NEOMIST_UI_HOST: &str = "neomist.localhost";
@@ -92,6 +93,9 @@ pub async fn run_https_server(state: AppState, certs: std::sync::Arc<CertManager
         .route("/api/clear-cache", post(clear_cache))
         .route("/api/helios/checkpoints", get(get_checkpoints))
         .route("/api/config", get(get_config).post(save_config_handler))
+        .route("/web3", any(web3_lookup))
+        .route("/web3/", any(web3_lookup))
+        .route("/web3/*path", any(web3_lookup))
         .route("/", get(serve_ui))
         .route("/*path", get(serve_ui))
         .with_state(state.clone());
@@ -633,6 +637,10 @@ async fn fetch_kubo_version(state: &AppState) -> Option<String> {
 
 async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {
     ens::proxy_request(&state, request).await
+}
+
+async fn web3_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {
+    web3::proxy_request(&state, request).await
 }
 
 async fn proxy_ipfs_api(State(state): State<AppState>, request: Request<Body>) -> Response<Body> {
