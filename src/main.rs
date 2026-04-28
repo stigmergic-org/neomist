@@ -102,6 +102,7 @@ Options:
   -h, --help  Print help
 ";
 
+#[derive(Debug)]
 enum CliCommand {
     Run,
     ShowHelp(&'static str),

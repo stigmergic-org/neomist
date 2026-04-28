@@ -281,7 +281,7 @@ fn grant_linux_bind_service_capability(exe_path: &Path) -> Result<()> {
         .arg(exe_path)
         .status()
         .wrap_err(
-            "Failed to grant Linux bind capability. Install libcap2-bin if setcap is unavailable.",
+            "Failed to grant Linux bind capability. Install libcap on Arch or libcap2-bin on Debian/Ubuntu if setcap is unavailable.",
         )?;
 
     if status.success() {

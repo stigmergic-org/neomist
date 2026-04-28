@@ -596,6 +596,7 @@ fn looks_like_offline_lookup_message(message: &str) -> bool {
         .any(|pattern| message.contains(pattern))
 }
 
+#[cfg(test)]
 fn decode_contenthash(bytes: &AlloyBytes) -> Option<ResolvedContenthash> {
     match inspect_contenthash(bytes) {
         ContenthashRecord::Supported(contenthash) => Some(contenthash),
@@ -764,7 +765,8 @@ mod tests {
         inspect_contenthash, looks_like_offline_lookup_message,
     };
     use alloy::primitives::Bytes as AlloyBytes;
-    use cid::{Cid, multihash::{Code, MultihashDigest}};
+    use cid::{Cid, multihash::Multihash};
+    use sha2::{Digest as _, Sha256};
 
     #[test]
     fn detects_network_unreachable_lookup_failures() {
@@ -788,7 +790,7 @@ mod tests {
 
     #[test]
     fn decodes_ipfs_contenthash() {
-        let cid = Cid::new_v1(0x70, Code::Sha2_256.digest(b"neomist-ipfs"));
+        let cid = test_cid(0x70, b"neomist-ipfs");
         let bytes = encode_contenthash(IPFS_CODEC, &cid);
 
         assert_eq!(
@@ -799,7 +801,7 @@ mod tests {
 
     #[test]
     fn decodes_ipns_contenthash() {
-        let cid = Cid::new_v1(0x72, Code::Sha2_256.digest(b"neomist-ipns"));
+        let cid = test_cid(0x72, b"neomist-ipns");
         let bytes = encode_contenthash(IPNS_CODEC, &cid);
 
         assert_eq!(
@@ -810,7 +812,7 @@ mod tests {
 
     #[test]
     fn reports_unsupported_contenthash_codec() {
-        let cid = Cid::new_v1(0x70, Code::Sha2_256.digest(b"neomist-swarm"));
+        let cid = test_cid(0x70, b"neomist-swarm");
         let bytes = encode_contenthash(0xe4, &cid);
 
         assert_eq!(inspect_contenthash(&bytes), ContenthashRecord::UnsupportedCodec(0xe4));
@@ -831,6 +833,12 @@ mod tests {
         let mut bytes = encode_varint(codec);
         bytes.extend_from_slice(&cid.to_bytes());
         AlloyBytes::from(bytes)
+    }
+
+    fn test_cid(codec: u64, bytes: &[u8]) -> Cid {
+        let digest = Sha256::digest(bytes);
+        let multihash = Multihash::<64>::wrap(0x12, &digest).unwrap();
+        Cid::new_v1(codec, multihash)
     }
 
     fn encode_varint(mut value: u64) -> Vec<u8> {

@@ -39,7 +39,8 @@ NeoMist is a local-first desktop app for browsing `.eth` and `.wei` sites withou
 - Node.js and npm for the embedded UI build
 - A desktop session capable of running a tray app
 - On Ubuntu/Kubuntu for builds: `pkg-config`, `libglib2.0-dev`, `libgtk-3-dev`, and `libayatana-appindicator3-dev`
-- On Linux: `systemd-resolved`, `pkexec`, `update-ca-certificates`, and `libcap2-bin`
+- On Linux: `systemd-resolved`, `pkexec`, `setcap`, `xdg-open`, and a distro CA refresh tool
+  (`update-ca-certificates` on Debian/Ubuntu or `update-ca-trust` on Arch)
 
 ## Running Locally
 
@@ -137,6 +138,12 @@ Build an AppImage:
 scripts/build-appimage.sh
 ```
 
+Build an Arch Linux package:
+
+```bash
+scripts/build-arch.sh --local
+```
+
 Trigger Linux CI release builds from Cargo version:
 
 1. Open GitHub `Actions`
@@ -150,13 +157,15 @@ Current Linux outputs:
 - `dist/neomist-<version>-linux-arm64.deb`
 - `dist/neomist-<version>-linux-x86_64.AppImage`
 - `dist/neomist-<version>-linux-arm64.AppImage`
+- `dist/neomist-<version>-linux-x86_64.pkg.tar.zst`
 
 Linux packaging note:
 
 - `.deb` is primary Linux package because it installs NeoMist into stable native system paths and fits current DNS / CA trust / privileged-port model.
 - `.deb` manages runtime deps with `dpkg-shlibdeps` plus explicit host-tool deps for NeoMist's tray, DNS, cert, and integration flow.
 - AppImage is secondary convenience artifact. It remains useful for direct download, but current Linux setup still assumes stable writable executable path for `setcap` and autostart.
-- AppImage bundles shared libraries, but still relies on host system for integration tools like `pkexec`, `setcap`, `systemctl`, `update-ca-certificates`, and `xdg-open`.
+- AppImage bundles shared libraries, but still relies on host system for integration tools like `pkexec`, `setcap`, `systemctl`, distro CA refresh tooling, and `xdg-open`.
+- Arch package support targets x86_64 and uses `update-ca-trust` for system CA integration.
 - Current repo supports host-native Linux builds cleanly: `.deb` and AppImage on arm64 here, same scripts on x86_64 hosts. Full 4-target local matrix from this arm64 machine still needs extra cross/emulation setup.
 
 Current packaging ID defaults:

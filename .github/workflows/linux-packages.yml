@@ -125,3 +125,59 @@ jobs:
           name: neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.AppImage
           path: dist/neomist-${{ needs.prepare.outputs.version }}-linux-${{ matrix.artifact_arch }}.AppImage
           if-no-files-found: error
+
+  arch:
+    name: Arch Package (x86_64)
+    runs-on: ubuntu-24.04
+    needs: prepare
+    container:
+      image: archlinux:base-devel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            ca-certificates-utils \
+            cargo \
+            cmake \
+            git \
+            glib2 \
+            gtk3 \
+            libayatana-appindicator \
+            libcap \
+            namcap \
+            nodejs \
+            npm \
+            openssl \
+            pkgconf \
+            polkit \
+            rust \
+            sudo \
+            systemd \
+            xdg-utils
+
+      - name: Prepare makepkg user
+        run: |
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Validate PKGBUILD
+        run: sudo -u builder env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" bash -lc 'cd "$GITHUB_WORKSPACE" && namcap packaging/arch/PKGBUILD || true'
+
+      - name: Build Arch package
+        run: sudo -u builder env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" bash -lc 'cd "$GITHUB_WORKSPACE" && scripts/build-arch.sh --local'
+
+      - name: Validate Arch artifact
+        run: sudo -u builder env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" bash -lc 'cd "$GITHUB_WORKSPACE" && namcap dist/neomist-${{ needs.prepare.outputs.version }}-linux-x86_64.pkg.tar.zst || true'
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: neomist-${{ needs.prepare.outputs.version }}-linux-x86_64.pkg.tar.zst
+          path: dist/neomist-${{ needs.prepare.outputs.version }}-linux-x86_64.pkg.tar.zst
+          if-no-files-found: error
