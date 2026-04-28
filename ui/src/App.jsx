@@ -2060,127 +2060,190 @@ function SettingsPage() {
 
         <div className="mt-8 grid gap-5">
           <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <label className="mb-2 block text-sm font-medium">Consensus RPCs</label>
-            <p className="mb-4 text-sm text-base-content/55">
-              Used by Helios for beacon consensus. Only required when Helios is enabled. NeoMist will automatically fall back to the next one if the top fails.
-            </p>
-            
-            <div className="grid gap-3">
-              {consensusRpcs.map((rpc, index) => (
-                <div key={`consensus-${index}`} className="flex flex-wrap items-start gap-2 sm:flex-nowrap sm:items-center">
-                  <div className="flex flex-col gap-0.5">
-                    <button
-                      type="button"
-                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
-                      onClick={() => moveRpcUp(index, consensusRpcs, setConsensusRpcs)}
-                      disabled={index === 0}
-                    >
-                      ▲
-                    </button>
-                    <button
-                      type="button"
-                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
-                      onClick={() => moveRpcDown(index, consensusRpcs, setConsensusRpcs)}
-                      disabled={index === consensusRpcs.length - 1}
-                    >
-                      ▼
-                    </button>
-                  </div>
-                  <input
-                    className={INPUT_CLASS}
-                    value={rpc}
-                    onChange={(event) => {
-                      const next = [...consensusRpcs];
-                      next[index] = event.target.value;
-                      setConsensusRpcs(next);
-                    }}
-                    placeholder="https://"
-                    type="url"
-                    autoComplete="off"
-                    spellCheck="false"
-                    required={index === 0}
-                  />
-                  <button
-                    type="button"
-                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-error/30 bg-error/10 text-error transition hover:bg-error/20"
-                    onClick={() => removeRpc(index, consensusRpcs, setConsensusRpcs)}
-                    aria-label="Remove endpoint"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
+            <div>
+              <label className="block text-sm font-medium">RPC Behaviour</label>
+              <p className="mt-2 max-w-2xl text-sm text-base-content/55">
+                Configure how NeoMist exposes local JSON-RPC and which upstream endpoints it uses.
+              </p>
             </div>
-            
-            <button
-              type="button"
-              className="mt-4 text-sm font-medium text-primary transition hover:opacity-80"
-              onClick={() => addRpc(consensusRpcs, setConsensusRpcs)}
-            >
-              + Add fallback endpoint
-            </button>
-          </div>
 
-          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <label className="mb-2 block text-sm font-medium">Execution RPCs</label>
-            <p className="mb-4 text-sm text-base-content/55">
-              Used for EVM execution calls. NeoMist will automatically fall back to the next one if the top fails.
-            </p>
-            
-            <div className="grid gap-3">
-              {executionRpcs.map((rpc, index) => (
-                <div key={`exec-${index}`} className="flex flex-wrap items-start gap-2 sm:flex-nowrap sm:items-center">
-                  <div className="flex flex-col gap-0.5">
-                    <button
-                      type="button"
-                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
-                      onClick={() => moveRpcUp(index, executionRpcs, setExecutionRpcs)}
-                      disabled={index === 0}
-                    >
-                      ▲
-                    </button>
-                    <button
-                      type="button"
-                    className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
-                      onClick={() => moveRpcDown(index, executionRpcs, setExecutionRpcs)}
-                      disabled={index === executionRpcs.length - 1}
-                    >
-                      ▼
-                    </button>
+            <div className="mt-4 grid gap-4">
+              <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <label className="block text-sm font-medium">Local RPC</label>
+                    <p className="mt-2 max-w-2xl text-sm text-base-content/55">
+                      {heliosEnabled
+                        ? 'NeoMist exposes a local JSON-RPC endpoint backed by Helios. Requests stay on this machine and use your configured consensus and execution fallbacks.'
+                        : 'NeoMist exposes a local JSON-RPC endpoint that forwards directly to your first configured execution RPC while Helios is disabled.'}
+                    </p>
                   </div>
+
+                  <StatusPill tone={rpcCopyStatus === 'copied' ? 'success' : rpcCopyStatus === 'failed' ? 'warning' : 'info'}>
+                    {rpcCopyStatus === 'copied'
+                      ? 'Copied'
+                      : rpcCopyStatus === 'failed'
+                        ? 'Copy failed'
+                        : 'JSON-RPC'}
+                  </StatusPill>
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
                   <input
-                    className={INPUT_CLASS}
-                    value={rpc}
-                    onChange={(event) => {
-                      const next = [...executionRpcs];
-                      next[index] = event.target.value;
-                      setExecutionRpcs(next);
-                    }}
-                    placeholder="https://"
-                    type="url"
-                    autoComplete="off"
-                    spellCheck="false"
-                    required={index === 0}
+                    className={classNames(INPUT_CLASS, 'font-mono text-sm')}
+                    value={localRpcUrl}
+                    readOnly
+                    aria-label="Local RPC endpoint"
                   />
                   <button
                     type="button"
-                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-error/30 bg-error/10 text-error transition hover:bg-error/20"
-                    onClick={() => removeRpc(index, executionRpcs, setExecutionRpcs)}
-                    aria-label="Remove endpoint"
+                    className={classNames(SECONDARY_BUTTON_CLASS, 'shrink-0 px-4')}
+                    onClick={copyLocalRpcUrl}
                   >
-                    ✕
+                    Copy endpoint
                   </button>
                 </div>
-              ))}
+              </div>
+
+              <label className={classNames(SUBTLE_PANEL_CLASS, 'flex cursor-pointer flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between')}>
+                <div>
+                  <p className="text-sm font-medium">Enable Helios</p>
+                  <p className="mt-1 text-xs text-base-content/50">
+                    Disable if you want NeoMist to forward directly to your first execution RPC. Requires app restart to take effect.
+                  </p>
+                </div>
+                <input
+                  className="toggle toggle-primary"
+                  type="checkbox"
+                  checked={heliosEnabled}
+                  onChange={(event) => setHeliosEnabled(event.target.checked)}
+                />
+              </label>
+
+              <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+                <label className="mb-2 block text-sm font-medium">Consensus RPCs</label>
+                <p className="mb-4 text-sm text-base-content/55">
+                  Used by Helios for beacon consensus. Only required when Helios is enabled. NeoMist will automatically fall back to next one if top fails.
+                </p>
+
+                <div className="grid gap-3">
+                  {consensusRpcs.map((rpc, index) => (
+                    <div key={`consensus-${index}`} className="flex flex-wrap items-start gap-2 sm:flex-nowrap sm:items-center">
+                      <div className="flex flex-col gap-0.5">
+                        <button
+                          type="button"
+                          className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                          onClick={() => moveRpcUp(index, consensusRpcs, setConsensusRpcs)}
+                          disabled={index === 0}
+                        >
+                          ▲
+                        </button>
+                        <button
+                          type="button"
+                          className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                          onClick={() => moveRpcDown(index, consensusRpcs, setConsensusRpcs)}
+                          disabled={index === consensusRpcs.length - 1}
+                        >
+                          ▼
+                        </button>
+                      </div>
+                      <input
+                        className={INPUT_CLASS}
+                        value={rpc}
+                        onChange={(event) => {
+                          const next = [...consensusRpcs];
+                          next[index] = event.target.value;
+                          setConsensusRpcs(next);
+                        }}
+                        placeholder="https://"
+                        type="url"
+                        autoComplete="off"
+                        spellCheck="false"
+                        required={index === 0}
+                      />
+                      <button
+                        type="button"
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-error/30 bg-error/10 text-error transition hover:bg-error/20"
+                        onClick={() => removeRpc(index, consensusRpcs, setConsensusRpcs)}
+                        aria-label="Remove endpoint"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  className="mt-4 text-sm font-medium text-primary transition hover:opacity-80"
+                  onClick={() => addRpc(consensusRpcs, setConsensusRpcs)}
+                >
+                  + Add fallback endpoint
+                </button>
+              </div>
+
+              <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+                <label className="mb-2 block text-sm font-medium">Execution RPCs</label>
+                <p className="mb-4 text-sm text-base-content/55">
+                  Used for EVM execution calls. NeoMist will automatically fall back to next one if top fails.
+                </p>
+
+                <div className="grid gap-3">
+                  {executionRpcs.map((rpc, index) => (
+                    <div key={`exec-${index}`} className="flex flex-wrap items-start gap-2 sm:flex-nowrap sm:items-center">
+                      <div className="flex flex-col gap-0.5">
+                        <button
+                          type="button"
+                          className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                          onClick={() => moveRpcUp(index, executionRpcs, setExecutionRpcs)}
+                          disabled={index === 0}
+                        >
+                          ▲
+                        </button>
+                        <button
+                          type="button"
+                          className="vapor-badge flex h-5 w-6 items-center justify-center rounded border border-base-300 bg-base-100/50 text-xs text-base-content/60 transition hover:bg-base-200 disabled:opacity-30"
+                          onClick={() => moveRpcDown(index, executionRpcs, setExecutionRpcs)}
+                          disabled={index === executionRpcs.length - 1}
+                        >
+                          ▼
+                        </button>
+                      </div>
+                      <input
+                        className={INPUT_CLASS}
+                        value={rpc}
+                        onChange={(event) => {
+                          const next = [...executionRpcs];
+                          next[index] = event.target.value;
+                          setExecutionRpcs(next);
+                        }}
+                        placeholder="https://"
+                        type="url"
+                        autoComplete="off"
+                        spellCheck="false"
+                        required={index === 0}
+                      />
+                      <button
+                        type="button"
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-error/30 bg-error/10 text-error transition hover:bg-error/20"
+                        onClick={() => removeRpc(index, executionRpcs, setExecutionRpcs)}
+                        aria-label="Remove endpoint"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  className="mt-4 text-sm font-medium text-primary transition hover:opacity-80"
+                  onClick={() => addRpc(executionRpcs, setExecutionRpcs)}
+                >
+                  + Add fallback endpoint
+                </button>
+              </div>
             </div>
-            
-            <button
-              type="button"
-              className="mt-4 text-sm font-medium text-primary transition hover:opacity-80"
-              onClick={() => addRpc(executionRpcs, setExecutionRpcs)}
-            >
-              + Add fallback endpoint
-            </button>
           </div>
 
           <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
@@ -2224,21 +2287,6 @@ function SettingsPage() {
 
               <label className="flex cursor-pointer flex-col gap-3 border-t border-base-300/60 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <p className="text-sm font-medium">Enable Helios</p>
-                  <p className="mt-1 text-xs text-base-content/50">
-                    Useful if you run an ethereum node locally. Requires app restart to take effect.
-                  </p>
-                </div>
-                <input
-                  className="toggle toggle-primary"
-                  type="checkbox"
-                  checked={heliosEnabled}
-                  onChange={(event) => setHeliosEnabled(event.target.checked)}
-                />
-              </label>
-
-              <label className="flex cursor-pointer flex-col gap-3 border-t border-base-300/60 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-                <div>
                   <p className="text-sm font-medium">Start on login</p>
                 </div>
                 <input
@@ -2251,42 +2299,6 @@ function SettingsPage() {
             </div>
           </div>
 
-          <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <label className="block text-sm font-medium">Local RPC</label>
-                <p className="mt-2 max-w-2xl text-sm text-base-content/55">
-                  {heliosEnabled
-                    ? 'NeoMist exposes a local JSON-RPC endpoint backed by Helios. Requests stay on this machine and use your configured consensus and execution fallbacks.'
-                    : 'NeoMist exposes a local JSON-RPC endpoint that forwards directly to your first configured execution RPC while Helios is disabled.'}
-                </p>
-              </div>
-
-              <StatusPill tone={rpcCopyStatus === 'copied' ? 'success' : rpcCopyStatus === 'failed' ? 'warning' : 'info'}>
-                {rpcCopyStatus === 'copied'
-                  ? 'Copied'
-                  : rpcCopyStatus === 'failed'
-                    ? 'Copy failed'
-                    : 'JSON-RPC'}
-              </StatusPill>
-            </div>
-
-            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
-              <input
-                className={classNames(INPUT_CLASS, 'font-mono text-sm')}
-                value={localRpcUrl}
-                readOnly
-                aria-label="Local RPC endpoint"
-              />
-              <button
-                type="button"
-                className={classNames(SECONDARY_BUTTON_CLASS, 'shrink-0 px-4')}
-                onClick={copyLocalRpcUrl}
-              >
-                Copy endpoint
-              </button>
-            </div>
-          </div>
         </div>
 
         <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-6 p-5')}>
