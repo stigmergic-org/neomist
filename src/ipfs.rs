@@ -18,7 +18,7 @@ use url::form_urlencoded;
 
 use crate::state::AppState;
 
-const KUBO_VERSION: &str = "v0.40.1";
+const KUBO_VERSION: &str = "v0.41.0";
 const IPFS_API_PORT: u16 = 5001;
 const MANAGED_GATEWAY_PORT: u16 = 58080;
 const KUBO_DIST_BASE: &str = "https://dist.ipfs.tech/kubo";
@@ -259,8 +259,6 @@ async fn download_kubo(
 ) -> Result<PathBuf> {
     let (os, arch) = kubo_platform_target()?;
     let filename = format!("kubo_{KUBO_VERSION}_{os}-{arch}.tar.gz");
-    let checksum_name = format!("{filename}.sha512");
-
     fs::create_dir_all(bin_dir).wrap_err("Failed to create kubo bin dir")?;
     fs::create_dir_all(download_dir).wrap_err("Failed to create kubo download dir")?;
 
@@ -291,21 +289,7 @@ async fn download_kubo(
         }
     }
 
-    let checksum_url = format!("{KUBO_DIST_BASE}/{KUBO_VERSION}/{checksum_name}");
-    let checksum_text = http_client
-        .get(checksum_url)
-        .send()
-        .await
-        .wrap_err("Failed to fetch kubo checksum")?
-        .text()
-        .await
-        .wrap_err("Failed to read kubo checksum")?;
-
-    let expected_hash = checksum_text
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| eyre::eyre!("Checksum not found for {filename}"))?
-        .to_lowercase();
+    let expected_hash = kubo_expected_sha512(&os, &arch)?;
 
     let tarball_url = format!("{KUBO_DIST_BASE}/{KUBO_VERSION}/{filename}");
     let bytes = http_client
@@ -488,6 +472,34 @@ fn kubo_platform_target() -> Result<(String, String)> {
     };
 
     Ok((os.to_string(), arch.to_string()))
+}
+
+fn kubo_expected_sha512(os: &str, arch: &str) -> Result<&'static str> {
+    match (normalized_kubo_version(KUBO_VERSION), os, arch) {
+        (
+            "0.41.0",
+            "linux",
+            "amd64",
+        ) => Ok("5c0f3dba6d29d30e3f3cfdbf7f7b05c228167d21211207b9c17a106f5c846d33895cd42a618eed989073b48af4a870df7f1f6c86a052796b02ea79767b66e4ef"),
+        (
+            "0.41.0",
+            "linux",
+            "arm64",
+        ) => Ok("443a205d97dad590a6828e6ce994421b4fd6fa55feb9173c79b7b533b9d2c39646f0bfe2b9bcc3c6e25fe7876eae335586fddcfeefd48b2beb48c522d9713032"),
+        (
+            "0.41.0",
+            "darwin",
+            "amd64",
+        ) => Ok("f4c8cd6037791fcad2aa5e79f39268141df2ffe91710956499e813b77d2ad49de84e9cb52426fb8e006a52f6cf9a5ea1dc1964acf860d4c3b7c9e756c4e59f54"),
+        (
+            "0.41.0",
+            "darwin",
+            "arm64",
+        ) => Ok("a44b7f00e21ac322dbe018bc56c7dbca6b3bde2404853041d6365439fe055bfaf97a9215c95c3b389d7e04c93233f00a65b14d5bdaa01d9854c039852831eb84"),
+        _ => Err(eyre::eyre!(
+            "No hardcoded Kubo checksum for version {KUBO_VERSION} target {os}-{arch}"
+        )),
+    }
 }
 
 fn kubo_paths(base_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {

@@ -596,6 +596,7 @@ fn looks_like_offline_lookup_message(message: &str) -> bool {
         .any(|pattern| message.contains(pattern))
 }
 
+#[cfg(test)]
 fn decode_contenthash(bytes: &AlloyBytes) -> Option<ResolvedContenthash> {
     match inspect_contenthash(bytes) {
         ContenthashRecord::Supported(contenthash) => Some(contenthash),
