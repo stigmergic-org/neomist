@@ -1797,6 +1797,7 @@ function SettingsPage() {
   const [executionRpcs, setExecutionRpcs] = useState(['']);
   const [followingInterval, setFollowingInterval] = useState(30);
   const [showTrayGasPrice, setShowTrayGasPrice] = useState(true);
+  const [heliosEnabled, setHeliosEnabled] = useState(true);
   const [startOnLogin, setStartOnLogin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
@@ -1826,14 +1827,16 @@ function SettingsPage() {
         const execs = Array.isArray(data.execution_rpcs) && data.execution_rpcs.length > 0 ? data.execution_rpcs : ['https://eth.drpc.org'];
         const interval = typeof data.following_check_interval_mins === 'number' ? data.following_check_interval_mins : 30;
         const trayGasPrice = typeof data.show_tray_gas_price === 'boolean' ? data.show_tray_gas_price : true;
+        const helios = typeof data.helios_enabled === 'boolean' ? data.helios_enabled : true;
         const startOnLoginEnabled = typeof data.start_on_login === 'boolean' ? data.start_on_login : false;
 
         setConsensusRpcs(cons);
         setExecutionRpcs(execs);
         setFollowingInterval(interval);
         setShowTrayGasPrice(trayGasPrice);
+        setHeliosEnabled(helios);
         setStartOnLogin(startOnLoginEnabled);
-        setInitialConfig(JSON.stringify({ cons, execs, interval, trayGasPrice, startOnLogin: startOnLoginEnabled }));
+        setInitialConfig(JSON.stringify({ cons, execs, interval, trayGasPrice, helios, startOnLogin: startOnLoginEnabled }));
         setStatus({ type: '', message: '' });
       } catch {
         if (!mounted) {
@@ -1903,6 +1906,7 @@ function SettingsPage() {
       execs: executionRpcs,
       interval: followingInterval,
       trayGasPrice: showTrayGasPrice,
+      helios: heliosEnabled,
       startOnLogin,
     });
 
@@ -1914,8 +1918,13 @@ function SettingsPage() {
       const cleanExecRpcs = executionRpcs.map(r => r.trim()).filter(Boolean);
       const cleanConsensusRpcs = consensusRpcs.map(r => r.trim()).filter(Boolean);
       
-      if (cleanExecRpcs.length === 0 || cleanConsensusRpcs.length === 0) {
-        setStatus({ type: 'error', message: 'At least one Consensus and Execution RPC is required.' });
+      if (cleanExecRpcs.length === 0 || (heliosEnabled && cleanConsensusRpcs.length === 0)) {
+        setStatus({
+          type: 'error',
+          message: heliosEnabled
+            ? 'At least one Consensus and Execution RPC is required when Helios is enabled.'
+            : 'At least one Execution RPC is required.',
+        });
         return;
       }
 
@@ -1930,6 +1939,7 @@ function SettingsPage() {
             execution_rpcs: cleanExecRpcs,
             following_check_interval_mins: Number(followingInterval),
             show_tray_gas_price: showTrayGasPrice,
+            helios_enabled: heliosEnabled,
             start_on_login: startOnLogin,
           }),
         });
@@ -1958,7 +1968,7 @@ function SettingsPage() {
     }, 600);
 
     return () => clearTimeout(timer);
-  }, [consensusRpcs, executionRpcs, followingInterval, isInitialLoad, showTrayGasPrice, startOnLogin]);
+  }, [consensusRpcs, executionRpcs, followingInterval, heliosEnabled, isInitialLoad, showTrayGasPrice, startOnLogin]);
 
   const moveRpcUp = (index, list, setList) => {
     if (index === 0) return;
@@ -2052,7 +2062,7 @@ function SettingsPage() {
           <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
             <label className="mb-2 block text-sm font-medium">Consensus RPCs</label>
             <p className="mb-4 text-sm text-base-content/55">
-              Used by Helios for beacon consensus. NeoMist will automatically fall back to the next one if the top fails.
+              Used by Helios for beacon consensus. Only required when Helios is enabled. NeoMist will automatically fall back to the next one if the top fails.
             </p>
             
             <div className="grid gap-3">
@@ -2214,6 +2224,21 @@ function SettingsPage() {
 
               <label className="flex cursor-pointer flex-col gap-3 border-t border-base-300/60 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
+                  <p className="text-sm font-medium">Enable Helios</p>
+                  <p className="mt-1 text-xs text-base-content/50">
+                    Useful if you run an ethereum node locally. Requires app restart to take effect.
+                  </p>
+                </div>
+                <input
+                  className="toggle toggle-primary"
+                  type="checkbox"
+                  checked={heliosEnabled}
+                  onChange={(event) => setHeliosEnabled(event.target.checked)}
+                />
+              </label>
+
+              <label className="flex cursor-pointer flex-col gap-3 border-t border-base-300/60 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
                   <p className="text-sm font-medium">Start on login</p>
                 </div>
                 <input
@@ -2231,7 +2256,9 @@ function SettingsPage() {
               <div>
                 <label className="block text-sm font-medium">Local RPC</label>
                 <p className="mt-2 max-w-2xl text-sm text-base-content/55">
-                  NeoMist exposes a local JSON-RPC endpoint backed by Helios. Requests stay on this machine and use your configured consensus and execution fallbacks.
+                  {heliosEnabled
+                    ? 'NeoMist exposes a local JSON-RPC endpoint backed by Helios. Requests stay on this machine and use your configured consensus and execution fallbacks.'
+                    : 'NeoMist exposes a local JSON-RPC endpoint that forwards directly to your first configured execution RPC while Helios is disabled.'}
                 </p>
               </div>
 
