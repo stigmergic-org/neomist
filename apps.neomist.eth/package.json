@@ -1,0 +1,16 @@
+{
+  "name": "apps.neomist.eth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-names": "node src/cli.mjs sync-names",
+    "export-ipfs": "node src/cli.mjs export-ipfs",
+    "db-stats": "node src/cli.mjs db-stats",
+    "list-names": "node src/cli.mjs list-names",
+    "show-name": "node src/cli.mjs show-name",
+    "list-probe-failures": "node src/cli.mjs list-probe-failures"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0"
+  }
+}
