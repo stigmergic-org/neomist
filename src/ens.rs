@@ -6,7 +6,8 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header::HOST};
 use eyre::{Report, Result, WrapErr};
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::future::Future;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use url::form_urlencoded;
 
@@ -40,8 +41,6 @@ const OFFLINE_LOOKUP_PATTERNS: &[&str] = &[
     "dns error",
     "error sending request",
     "failed to lookup address information",
-    "out of sync",
-    "seconds behind",
     "network is unreachable",
     "no route to host",
     "temporarily unavailable",
@@ -53,6 +52,8 @@ const OFFLINE_LOOKUP_PATTERNS: &[&str] = &[
     "timed out",
     "timeout",
 ];
+const HELIOS_SYNC_LOOKUP_PATTERNS: &[&str] = &["out of sync", "seconds behind"];
+const LOOKUP_RETRY_DELAYS_MS: &[u64] = &[300, 1000];
 
 const IPFS_CODEC: u64 = 0xe3;
 const IPNS_CODEC: u64 = 0xe5;
@@ -591,11 +592,64 @@ fn is_offline_lookup_error(err: &Report) -> bool {
         .any(|cause| looks_like_offline_lookup_message(&cause.to_string()))
 }
 
+fn is_retryable_lookup_error(err: &Report) -> bool {
+    err.chain()
+        .any(|cause| looks_like_retryable_lookup_message(&cause.to_string()))
+}
+
 fn looks_like_offline_lookup_message(message: &str) -> bool {
+    message_matches_patterns(message, OFFLINE_LOOKUP_PATTERNS)
+}
+
+fn looks_like_retryable_lookup_message(message: &str) -> bool {
+    looks_like_offline_lookup_message(message) || looks_like_helios_sync_lookup_message(message)
+}
+
+fn looks_like_helios_sync_lookup_message(message: &str) -> bool {
+    message_matches_patterns(message, HELIOS_SYNC_LOOKUP_PATTERNS)
+}
+
+fn message_matches_patterns(message: &str, patterns: &[&str]) -> bool {
     let message = message.to_ascii_lowercase();
-    OFFLINE_LOOKUP_PATTERNS
-        .iter()
-        .any(|pattern| message.contains(pattern))
+    patterns.iter().any(|pattern| message.contains(pattern))
+}
+
+async fn with_lookup_retries<T, F, Fut>(host: &str, lookup_kind: &str, lookup: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    with_lookup_retries_using_delays(host, lookup_kind, LOOKUP_RETRY_DELAYS_MS, lookup).await
+}
+
+async fn with_lookup_retries_using_delays<T, F, Fut>(
+    host: &str,
+    lookup_kind: &str,
+    retry_delays_ms: &[u64],
+    mut lookup: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let total_attempts = retry_delays_ms.len() + 1;
+
+    for attempt in 0..total_attempts {
+        match lookup().await {
+            Ok(value) => return Ok(value),
+            Err(err) if is_retryable_lookup_error(&err) && attempt + 1 < total_attempts => {
+                let delay_ms = retry_delays_ms[attempt];
+                warn!(
+                    "Transient {lookup_kind} lookup failed for {host} on attempt {} of {total_attempts}: {err:#}; retrying in {delay_ms}ms",
+                    attempt + 1,
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    unreachable!("lookup retry loop must return on success or final error")
 }
 
 #[cfg(test)]
@@ -638,10 +692,14 @@ async fn resolve_contenthash_record(
     provider: &DynProvider,
     host: &str,
 ) -> Result<ContenthashRecord> {
-    if host.ends_with(".wei") {
-        return resolve_wei_contenthash_record(provider, host).await;
-    }
-    resolve_ens_contenthash_record(provider, host).await
+    with_lookup_retries(host, "contenthash", || async {
+        if host.ends_with(".wei") {
+            resolve_wei_contenthash_record_once(provider, host).await
+        } else {
+            resolve_ens_contenthash_record_once(provider, host).await
+        }
+    })
+    .await
 }
 
 fn decode_varint(bytes: &AlloyBytes) -> Option<(u64, usize)> {
@@ -687,13 +745,17 @@ pub async fn resolve_contenthash(
 }
 
 pub async fn resolve_address(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
-    if host.ends_with(".wei") {
-        return resolve_wei_address(provider, host).await;
-    }
-    resolve_ens_address(provider, host).await
+    with_lookup_retries(host, "address", || async {
+        if host.ends_with(".wei") {
+            resolve_wei_address_once(provider, host).await
+        } else {
+            resolve_ens_address_once(provider, host).await
+        }
+    })
+    .await
 }
 
-async fn resolve_ens_contenthash_record(
+async fn resolve_ens_contenthash_record_once(
     provider: &DynProvider,
     ens_name: &str,
 ) -> Result<ContenthashRecord> {
@@ -719,7 +781,7 @@ async fn resolve_ens_contenthash_record(
     Ok(inspect_contenthash(&contenthash))
 }
 
-async fn resolve_ens_address(provider: &DynProvider, ens_name: &str) -> Result<Option<Address>> {
+async fn resolve_ens_address_once(provider: &DynProvider, ens_name: &str) -> Result<Option<Address>> {
     let node: B256 = namehash(ens_name);
     let registry = EnsRegistry::new(ENS_ADDRESS, provider);
     let resolver_addr: Address = registry
@@ -742,7 +804,7 @@ async fn resolve_ens_address(provider: &DynProvider, ens_name: &str) -> Result<O
     Ok((address != Address::ZERO).then_some(address))
 }
 
-async fn resolve_wei_contenthash_record(
+async fn resolve_wei_contenthash_record_once(
     provider: &DynProvider,
     host: &str,
 ) -> Result<ContenthashRecord> {
@@ -757,7 +819,7 @@ async fn resolve_wei_contenthash_record(
     Ok(inspect_contenthash(&contenthash))
 }
 
-async fn resolve_wei_address(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
+async fn resolve_wei_address_once(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
     let node = wei_namehash(host);
     let contract = WeiNameService::new(WEI_REGISTRY, provider);
     let address = contract
@@ -805,23 +867,107 @@ fn wei_namehash(name: &str) -> B256 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContenthashRecord, IPFS_CODEC, IPNS_CODEC, ResolvedContenthash, decode_contenthash,
-        inspect_contenthash, looks_like_offline_lookup_message,
+        ContenthashRecord, IPFS_CODEC, IPNS_CODEC, ResolvedContenthash,
+        decode_contenthash, inspect_contenthash, looks_like_offline_lookup_message,
+        looks_like_retryable_lookup_message, with_lookup_retries_using_delays,
     };
     use alloy::primitives::Bytes as AlloyBytes;
     use cid::{Cid, multihash::{Code, MultihashDigest}};
 
     #[test]
-    fn detects_network_unreachable_lookup_failures() {
+    fn detects_offline_lookup_failures() {
         assert!(looks_like_offline_lookup_message(
             "error sending request for url (https://rpc.example): Network is unreachable (os error 51)"
         ));
         assert!(looks_like_offline_lookup_message(
             "failed to lookup address information: nodename nor servname provided, or not known"
         ));
-        assert!(looks_like_offline_lookup_message(
+        assert!(!looks_like_offline_lookup_message(
             "server returned an error response: error code 1: out of sync: 1774266794 seconds behind"
         ));
+    }
+
+    #[test]
+    fn detects_retryable_lookup_failures() {
+        assert!(looks_like_retryable_lookup_message(
+            "error sending request for url (https://rpc.example): Network is unreachable (os error 51)"
+        ));
+        assert!(looks_like_retryable_lookup_message(
+            "server returned an error response: error code 1: out of sync: 1774266794 seconds behind"
+        ));
+    }
+
+    #[test]
+    fn ignores_non_retryable_lookup_failures() {
+        assert!(!looks_like_retryable_lookup_message(
+            "failed to resolve ENS contenthash: execution reverted"
+        ));
+    }
+
+    #[tokio::test]
+    async fn retries_transient_lookup_failures_until_success() {
+        let mut attempts = 0usize;
+        let value = with_lookup_retries_using_delays(
+            "ens.eth",
+            "contenthash",
+            &[0, 0],
+            || {
+                attempts += 1;
+                let attempt = attempts;
+                async move {
+                    if attempt < 3 {
+                        Err(eyre::eyre!(
+                            "server returned an error response: error code 1: out of sync: 12 seconds behind"
+                        ))
+                    } else {
+                        Ok(attempt)
+                    }
+                }
+            },
+        )
+        .await
+        .expect("retryable error should eventually succeed");
+
+        assert_eq!(value, 3);
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_successful_missing_lookup() {
+        let mut attempts = 0usize;
+        let result = with_lookup_retries_using_delays(
+            "ens.eth",
+            "contenthash",
+            &[0, 0],
+            || {
+                attempts += 1;
+                async move { Ok(ContenthashRecord::Missing) }
+            },
+        )
+        .await
+        .expect("successful lookup should return immediately");
+
+        assert_eq!(result, ContenthashRecord::Missing);
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_non_retryable_lookup_failure() {
+        let mut attempts = 0usize;
+        let err = with_lookup_retries_using_delays(
+            "ens.eth",
+            "contenthash",
+            &[0, 0],
+            || {
+                attempts += 1;
+                async move { Err(eyre::eyre!("execution reverted")) }
+            },
+        )
+        .await
+        .expect_err("non-retryable error should bubble immediately");
+
+        assert_eq!(attempts, 1);
+        assert!(format!("{err:#}").contains("execution reverted"));
     }
 
     #[test]

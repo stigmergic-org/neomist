@@ -402,35 +402,63 @@ fn build_html_error_response(
 
     .actions {{
       display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
       justify-content: flex-start;
     }}
 
-    .vapor-button-primary {{
+    .vapor-button-primary,
+    .vapor-button-secondary {{
       display: inline-flex;
       align-items: center;
       justify-content: center;
       min-height: 48px;
       padding: 0 18px;
       border-radius: 16px;
+      text-decoration: none;
+      font-size: 0.95rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: transform 0.2s ease, filter 0.2s ease;
+    }}
+
+    .vapor-button-primary {{
       border: 1px solid color-mix(in srgb, var(--primary) 34%, transparent);
       background: linear-gradient(135deg, var(--primary), var(--secondary));
       box-shadow: var(--button-shadow);
       color: #fff;
-      text-decoration: none;
-      font-size: 0.95rem;
-      font-weight: 600;
-      transition: transform 0.2s ease, filter 0.2s ease;
+    }}
+
+    .vapor-button-secondary {{
+      border: 1px solid rgba(39, 48, 74, 0.1);
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--base-content);
+      box-shadow: 0 6px 16px rgba(111, 108, 246, 0.04);
     }}
 
     @media (prefers-color-scheme: dark) {{
       .vapor-button-primary {{
         color: #14182c;
       }}
+
+      .vapor-button-secondary {{
+        border-color: rgba(238, 242, 255, 0.1);
+        background: rgba(22, 27, 46, 0.78);
+        box-shadow: 0 6px 16px rgba(143, 140, 255, 0.04);
+      }}
     }}
 
-    .vapor-button-primary:hover {{
+    .vapor-button-primary:hover,
+    .vapor-button-secondary:hover {{
       transform: translateY(-1px);
       filter: saturate(1.03);
+    }}
+
+    .vapor-button-primary:focus-visible,
+    .vapor-button-secondary:focus-visible {{
+      outline: 2px solid color-mix(in srgb, var(--accent) 82%, transparent);
+      outline-offset: 3px;
     }}
 
     @media (max-width: 720px) {{
@@ -487,6 +515,7 @@ fn build_html_error_response(
         </section>
 
         <div class="actions">
+          <button class="vapor-button-secondary" type="button" onclick="window.location.reload()">Retry this page</button>
           <a class="vapor-button-primary" href="https://neomist.localhost">Open NeoMist dashboard</a>
         </div>
       </section>
@@ -746,6 +775,7 @@ mod tests {
         assert!(body.contains("NeoMist error page"));
         assert!(body.contains("example.eth"));
         assert!(body.contains("gateway timeout"));
+        assert!(body.contains("Retry this page"));
         assert!(body.contains("Open NeoMist dashboard"));
     }
 }
