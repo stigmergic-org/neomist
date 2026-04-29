@@ -11,6 +11,7 @@
     "list-probe-failures": "node src/cli.mjs list-probe-failures"
   },
   "dependencies": {
+    "kubo-rpc-client": "^6.1.0",
     "sql.js": "^1.13.0"
   }
 }

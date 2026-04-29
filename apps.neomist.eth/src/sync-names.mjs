@@ -8,17 +8,19 @@ import {
   fetchLatestContenthashBlock,
 } from './ensnode.mjs';
 import { isMainnetEnsName, isSubdomain, parentName } from './filters.mjs';
-import { probeEthLinkName } from './probe.mjs';
+import { createKuboProbeClient, probeKuboName } from './probe.mjs';
 
 export async function syncNames(store, options = {}) {
   const ensnodeUrl = options.ensnodeUrl ?? DEFAULTS.ensnodeUrl;
   const backfillLimit = options.limit ?? DEFAULTS.syncLimit;
   const eventBatchSize = options.eventBatchSize ?? DEFAULTS.eventBatchSize;
+  const kuboRpcUrl = options.kuboRpcUrl ?? DEFAULTS.kuboRpcUrl;
   const headReplayBlocks = options.headReplayBlocks ?? DEFAULTS.headReplayBlocks;
   const probeConcurrency = options.probeConcurrency ?? DEFAULTS.probeConcurrency;
   const timeoutMs = options.timeoutMs ?? DEFAULTS.timeoutMs;
   const maxBytes = options.maxBytes ?? DEFAULTS.maxBytes;
   const logger = options.logger ?? (() => {});
+  const kuboClient = createKuboProbeClient({ kuboRpcUrl });
 
   const latestHeadBlock = await fetchLatestContenthashBlock({ ensnodeUrl });
   if (latestHeadBlock == null) {
@@ -56,6 +58,7 @@ export async function syncNames(store, options = {}) {
     ensnodeUrl,
     events: headEvents,
     probeConcurrency,
+    kuboClient,
     timeoutMs,
     maxBytes,
     onlyUnknownNodes: false,
@@ -83,6 +86,7 @@ export async function syncNames(store, options = {}) {
     backfillLimit,
     eventBatchSize,
     probeConcurrency,
+    kuboClient,
     timeoutMs,
     maxBytes,
     cursorBlockExclusive: backfillCursorBlockExclusive,
@@ -113,6 +117,7 @@ async function runBackfillSync({
   backfillLimit,
   eventBatchSize,
   probeConcurrency,
+  kuboClient,
   timeoutMs,
   maxBytes,
   cursorBlockExclusive,
@@ -164,6 +169,7 @@ async function runBackfillSync({
     });
     const applySummary = await applyCurrentNameRecords(store, currentNames, {
       probeConcurrency,
+      kuboClient,
       timeoutMs,
       maxBytes,
     });
@@ -191,6 +197,7 @@ async function processEventSet({
   ensnodeUrl,
   events,
   probeConcurrency,
+  kuboClient,
   timeoutMs,
   maxBytes,
   onlyUnknownNodes,
@@ -208,6 +215,7 @@ async function processEventSet({
   });
   const applySummary = await applyCurrentNameRecords(store, currentNames, {
     probeConcurrency,
+    kuboClient,
     timeoutMs,
     maxBytes,
   });
@@ -266,7 +274,7 @@ async function hydrateCurrentNameRecords({ ensnodeUrl, candidateNodes, latestEve
   return currentNames;
 }
 
-async function applyCurrentNameRecords(store, currentNames, { probeConcurrency, timeoutMs, maxBytes }) {
+async function applyCurrentNameRecords(store, currentNames, { probeConcurrency, kuboClient, timeoutMs, maxBytes }) {
   const existingRowsByNode = store.getNameRowsByNodes(currentNames.map((row) => row.node));
   let upserted = 0;
   const probeTargets = [];
@@ -285,7 +293,7 @@ async function applyCurrentNameRecords(store, currentNames, { probeConcurrency, 
   }
 
   await mapLimit(probeTargets, probeConcurrency, async (currentName) => {
-    const probe = await probeEthLinkName(currentName.name, { timeoutMs, maxBytes });
+    const probe = await probeKuboName(currentName, { timeoutMs, maxBytes, kuboClient });
     store.insertProbe(currentName, probe);
   });
 

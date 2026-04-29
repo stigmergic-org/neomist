@@ -14,6 +14,7 @@ export const PATHS = {
 
 export const DEFAULTS = {
   ensnodeUrl: process.env.APPS_NEOMIST_ENSNODE_URL || process.env.ENSNODE_URL || 'https://api.alpha.ensnode.io/subgraph',
+  kuboRpcUrl: process.env.APPS_NEOMIST_KUBO_RPC_URL || process.env.KUBO_RPC_URL || process.env.IPFS_API || 'http://127.0.0.1:5001/api/v0',
   eventBatchSize: 100,
   syncLimit: 200,
   headReplayBlocks: 100,

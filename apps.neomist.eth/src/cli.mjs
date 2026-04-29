@@ -54,6 +54,7 @@ async function runSyncNames(store, flags) {
   const summary = await syncNames(store, {
     limit: parseIntegerFlag(flags.limit, DEFAULTS.syncLimit),
     eventBatchSize: parseIntegerFlag(flags['batch-size'], DEFAULTS.eventBatchSize),
+    kuboRpcUrl: flags['kubo-rpc-url'] ?? DEFAULTS.kuboRpcUrl,
     headReplayBlocks: parseIntegerFlag(flags['head-replay-blocks'], DEFAULTS.headReplayBlocks),
     probeConcurrency: parseIntegerFlag(flags['probe-concurrency'], DEFAULTS.probeConcurrency),
     timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.timeoutMs),
@@ -187,7 +188,7 @@ function printCommandHelp(command) {
 function printGeneralHelp() {
   process.stdout.write(`Usage: node src/cli.mjs <command> [options]\n\n`);
   process.stdout.write(`Commands:\n`);
-  process.stdout.write(`  sync-names            head sync recent ENSNode events, then backfill older ones, store current names, probe eth.link\n`);
+  process.stdout.write(`  sync-names            head sync recent ENSNode events, then backfill older ones, store current names, probe via Kubo RPC\n`);
   process.stdout.write(`  export-ipfs           export successful current names into ipfs-root\n`);
   process.stdout.write(`  db-stats              print SQLite stats\n`);
   process.stdout.write(`  list-names            print stored names (default limit 50)\n`);
@@ -202,8 +203,9 @@ function printSyncNamesHelp() {
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --limit N                 max historical names to backfill this run (default ${DEFAULTS.syncLimit})\n`);
   process.stdout.write(`  --batch-size N            ENSNode event page size (default ${DEFAULTS.eventBatchSize})\n`);
+  process.stdout.write(`  --kubo-rpc-url URL        Kubo RPC API URL or multiaddr (default ${DEFAULTS.kuboRpcUrl})\n`);
   process.stdout.write(`  --head-replay-blocks N    recent block replay window for head sync (default ${DEFAULTS.headReplayBlocks})\n`);
-  process.stdout.write(`  --probe-concurrency N     concurrent eth.link probes (default ${DEFAULTS.probeConcurrency})\n`);
+  process.stdout.write(`  --probe-concurrency N     concurrent Kubo probes (default ${DEFAULTS.probeConcurrency})\n`);
   process.stdout.write(`  --timeout-ms N            probe timeout (default ${DEFAULTS.timeoutMs})\n`);
   process.stdout.write(`  --max-bytes N             max probe body bytes (default ${DEFAULTS.maxBytes})\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
@@ -243,7 +245,7 @@ function printShowNameHelp() {
 
 function printListProbeFailuresHelp() {
   process.stdout.write(`Usage: node src/cli.mjs list-probe-failures [options]\n\n`);
-  process.stdout.write(`Print latest failed eth.link probes.\n\n`);
+  process.stdout.write(`Print latest failed contenthash probes.\n\n`);
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --limit N                 number of rows to print (default 50)\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
