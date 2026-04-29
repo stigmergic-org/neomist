@@ -10,6 +10,8 @@ use crate::constants::APP_DIR_NAME;
 
 const DEFAULT_CONSENSUS_RPC: &str = "https://ethereum.operationsolarstorm.org";
 pub const NEOMIST_DATA_DIR_ENV: &str = "NEOMIST_DATA_DIR";
+pub const NEOMIST_CONFIG_DIR_ENV: &str = "NEOMIST_CONFIG_DIR";
+pub const NEOMIST_CACHE_DIR_ENV: &str = "NEOMIST_CACHE_DIR";
 
 fn default_consensus_rpcs() -> Vec<String> {
     vec![DEFAULT_CONSENSUS_RPC.to_string()]
@@ -50,10 +52,16 @@ fn default_helios_enabled() -> bool {
     true
 }
 
-pub fn config_dir() -> Result<PathBuf> {
+pub fn config_dir_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(NEOMIST_CONFIG_DIR_ENV) {
+        return Ok(PathBuf::from(path));
+    }
     let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    let home = base.home_dir();
-    let path = home.join(".config").join(APP_DIR_NAME);
+    Ok(base.home_dir().join(".config").join(APP_DIR_NAME))
+}
+
+pub fn config_dir() -> Result<PathBuf> {
+    let path = config_dir_path()?;
     fs::create_dir_all(&path).wrap_err("Failed to create config directory")?;
     Ok(path)
 }
@@ -77,9 +85,16 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn cache_dir() -> Result<PathBuf> {
+pub fn cache_dir_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(NEOMIST_CACHE_DIR_ENV) {
+        return Ok(PathBuf::from(path));
+    }
     let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    let dir = base.cache_dir().join(APP_DIR_NAME);
+    Ok(base.cache_dir().join(APP_DIR_NAME))
+}
+
+pub fn cache_dir() -> Result<PathBuf> {
+    let dir = cache_dir_path()?;
     fs::create_dir_all(&dir).wrap_err("Failed to create cache directory")?;
     Ok(dir)
 }

@@ -37,7 +37,8 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::certs::CertManager;
 use crate::config::{
-    NEOMIST_DATA_DIR_ENV, cache_dir, config_dir, config_path, data_dir, load_or_create_config,
+    NEOMIST_CACHE_DIR_ENV, NEOMIST_CONFIG_DIR_ENV, NEOMIST_DATA_DIR_ENV,
+    cache_dir, cache_dir_path, config_dir_path, config_path, data_dir, load_or_create_config,
 };
 use crate::state::AppState;
 
@@ -541,11 +542,11 @@ fn uninstall(purge: bool) -> Result<()> {
         if data_dir.exists() {
             fs::remove_dir_all(&data_dir).wrap_err("Failed to remove data directory")?;
         }
-        let cfg_dir = config_dir()?;
+        let cfg_dir = config_dir_path()?;
         if cfg_dir.exists() {
             fs::remove_dir_all(&cfg_dir).wrap_err("Failed to remove config directory")?;
         }
-        let cache = cache_dir()?;
+        let cache = cache_dir_path()?;
         if cache.exists() {
             fs::remove_dir_all(&cache).wrap_err("Failed to remove cache directory")?;
         }
@@ -562,8 +563,24 @@ fn prompt_linux_uninstall(data_dir: &std::path::Path, purge: bool) -> Result<()>
         .arg(format!(
             "{NEOMIST_DATA_DIR_ENV}={}",
             data_dir.to_string_lossy()
+        ));
+
+    // Pre-resolve config/cache paths in the user context before pkexec resets HOME.
+    // Pass them explicitly so the elevated process uses the right directories.
+    if purge {
+        let cfg_dir = config_dir_path()?;
+        let cache = cache_dir_path()?;
+        cmd.arg(format!(
+            "{NEOMIST_CONFIG_DIR_ENV}={}",
+            cfg_dir.to_string_lossy()
         ))
-        .arg(exe_path)
+        .arg(format!(
+            "{NEOMIST_CACHE_DIR_ENV}={}",
+            cache.to_string_lossy()
+        ));
+    }
+
+    cmd.arg(exe_path)
         .arg("system")
         .arg("uninstall")
         .arg("--yes");
