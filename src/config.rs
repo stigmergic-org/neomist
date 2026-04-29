@@ -10,6 +10,9 @@ use crate::constants::APP_DIR_NAME;
 
 const DEFAULT_CONSENSUS_RPC: &str = "https://ethereum.operationsolarstorm.org";
 pub const NEOMIST_DATA_DIR_ENV: &str = "NEOMIST_DATA_DIR";
+pub const NEOMIST_CONFIG_DIR_ENV: &str = "NEOMIST_CONFIG_DIR";
+pub const NEOMIST_CACHE_DIR_ENV: &str = "NEOMIST_CACHE_DIR";
+pub const NEOMIST_REAL_USER_ENV: &str = "NEOMIST_REAL_USER";
 
 fn default_consensus_rpcs() -> Vec<String> {
     vec![DEFAULT_CONSENSUS_RPC.to_string()]
@@ -50,10 +53,15 @@ fn default_helios_enabled() -> bool {
     true
 }
 
+pub fn config_dir_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(NEOMIST_CONFIG_DIR_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(runtime_user_home_dir()?.join(".config").join(APP_DIR_NAME))
+}
+
 pub fn config_dir() -> Result<PathBuf> {
-    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    let home = base.home_dir();
-    let path = home.join(".config").join(APP_DIR_NAME);
+    let path = config_dir_path()?;
     fs::create_dir_all(&path).wrap_err("Failed to create config directory")?;
     Ok(path)
 }
@@ -77,9 +85,15 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn cache_dir_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(NEOMIST_CACHE_DIR_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(runtime_user_home_dir()?.join(".cache").join(APP_DIR_NAME))
+}
+
 pub fn cache_dir() -> Result<PathBuf> {
-    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    let dir = base.cache_dir().join(APP_DIR_NAME);
+    let dir = cache_dir_path()?;
     fs::create_dir_all(&dir).wrap_err("Failed to create cache directory")?;
     Ok(dir)
 }
@@ -125,16 +139,29 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn data_home_dir() -> Result<PathBuf> {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        if !user.is_empty() && user != "root" {
-            if let Ok(home) = home_dir_for_user(&user) {
-                return Ok(home);
-            }
+    runtime_user_home_dir()
+}
+
+pub fn runtime_user_home_dir() -> Result<PathBuf> {
+    if let Some(user) = preferred_real_user() {
+        if let Ok(home) = home_dir_for_user(&user) {
+            return Ok(home);
         }
     }
 
     let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
     Ok(base.home_dir().to_path_buf())
+}
+
+fn preferred_real_user() -> Option<String> {
+    std::env::var(NEOMIST_REAL_USER_ENV)
+        .ok()
+        .filter(|user| !user.is_empty() && user != "root")
+        .or_else(|| {
+            std::env::var("SUDO_USER")
+                .ok()
+                .filter(|user| !user.is_empty() && user != "root")
+        })
 }
 
 fn home_dir_for_user(user: &str) -> Result<PathBuf> {
@@ -175,4 +202,62 @@ fn home_dir_for_user(user: &str) -> Result<PathBuf> {
     };
 
     Ok(PathBuf::from(home))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        APP_DIR_NAME, NEOMIST_CACHE_DIR_ENV, NEOMIST_CONFIG_DIR_ENV, NEOMIST_REAL_USER_ENV,
+        cache_dir_path, config_dir_path,
+    };
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn config_dir_prefers_explicit_override() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var(NEOMIST_CONFIG_DIR_ENV, "/tmp/neomist-config-test");
+            std::env::remove_var(NEOMIST_CACHE_DIR_ENV);
+            std::env::remove_var(NEOMIST_REAL_USER_ENV);
+            std::env::remove_var("SUDO_USER");
+        }
+
+        assert_eq!(
+            config_dir_path().unwrap(),
+            PathBuf::from("/tmp/neomist-config-test")
+        );
+
+        unsafe {
+            std::env::remove_var(NEOMIST_CONFIG_DIR_ENV);
+        }
+    }
+
+    #[test]
+    fn cache_dir_uses_real_user_home_when_overridden_user_is_present() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::remove_var(NEOMIST_CACHE_DIR_ENV);
+            std::env::remove_var(NEOMIST_CONFIG_DIR_ENV);
+            std::env::set_var(NEOMIST_REAL_USER_ENV, "root");
+            std::env::set_var("SUDO_USER", "root");
+            std::env::set_var("HOME", "/tmp/neomist-home-test");
+        }
+
+        assert_eq!(
+            cache_dir_path().unwrap(),
+            PathBuf::from("/tmp/neomist-home-test/.cache").join(APP_DIR_NAME)
+        );
+
+        unsafe {
+            std::env::remove_var(NEOMIST_REAL_USER_ENV);
+            std::env::remove_var("SUDO_USER");
+            std::env::remove_var("HOME");
+        }
+    }
 }
