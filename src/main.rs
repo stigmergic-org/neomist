@@ -37,7 +37,7 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::certs::CertManager;
 use crate::config::{
-    NEOMIST_CACHE_DIR_ENV, NEOMIST_CONFIG_DIR_ENV, NEOMIST_DATA_DIR_ENV,
+    NEOMIST_CACHE_DIR_ENV, NEOMIST_CONFIG_DIR_ENV, NEOMIST_DATA_DIR_ENV, NEOMIST_REAL_USER_ENV,
     cache_dir, cache_dir_path, config_dir_path, config_path, data_dir, load_or_create_config,
 };
 use crate::state::AppState;
@@ -333,6 +333,37 @@ mod tests {
             "Unexpected argument after version flag: `extra`\nRun `neomist --help` for usage."
         );
     }
+
+    #[test]
+    fn parses_system_uninstall_with_purge() {
+        let args = vec![
+            "system".to_string(),
+            "uninstall".to_string(),
+            "--yes".to_string(),
+            "--purge".to_string(),
+        ];
+
+        let command = parse_cli_args(&args).expect("system uninstall should parse");
+        match command {
+            CliCommand::SystemUninstall { purge } => assert!(purge),
+            _ => panic!("expected system uninstall command"),
+        }
+    }
+
+    #[test]
+    fn rejects_system_uninstall_without_confirmation() {
+        let args = vec![
+            "system".to_string(),
+            "uninstall".to_string(),
+            "--purge".to_string(),
+        ];
+
+        let error = parse_cli_args(&args).expect_err("system uninstall without --yes should fail");
+        assert_eq!(
+            error.to_string(),
+            "System uninstall requires --yes\nRun `neomist system uninstall --help` for usage."
+        );
+    }
 }
 
 fn init_services(
@@ -374,11 +405,9 @@ fn init_services(
     let rpc_url = if config.helios_enabled {
         format!("http://{HELIOS_RPC_ADDR}")
     } else {
-        config
-            .execution_rpcs
-            .first()
-            .cloned()
-            .ok_or_else(|| eyre::eyre!("helios_enabled is false but no execution_rpcs configured"))?
+        config.execution_rpcs.first().cloned().ok_or_else(|| {
+            eyre::eyre!("helios_enabled is false but no execution_rpcs configured")
+        })?
     };
 
     let ens_provider = ProviderBuilder::new()
@@ -558,12 +587,14 @@ fn uninstall(purge: bool) -> Result<()> {
 
 fn prompt_linux_uninstall(data_dir: &std::path::Path, purge: bool) -> Result<()> {
     let exe_path = env::current_exe().wrap_err("Failed to resolve current executable")?;
+    let user = current_user_name()?;
     let mut cmd = Command::new("pkexec");
     cmd.arg("/usr/bin/env")
         .arg(format!(
             "{NEOMIST_DATA_DIR_ENV}={}",
             data_dir.to_string_lossy()
-        ));
+        ))
+        .arg(format!("{NEOMIST_REAL_USER_ENV}={user}"));
 
     // Pre-resolve config/cache paths in the user context before pkexec resets HOME.
     // Pass them explicitly so the elevated process uses the right directories.
@@ -636,4 +667,22 @@ fn current_user_is_root() -> Result<bool> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
+}
+
+fn current_user_name() -> Result<String> {
+    if let Ok(user) = env::var("USER") {
+        if !user.is_empty() {
+            return Ok(user);
+        }
+    }
+
+    let output = Command::new("id")
+        .arg("-un")
+        .output()
+        .wrap_err("Failed to determine current user name")?;
+    if !output.status.success() {
+        return Err(eyre::eyre!("Failed to determine current user name"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

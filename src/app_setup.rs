@@ -5,18 +5,19 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use directories::BaseDirs;
 use eyre::{ContextCompat, Result, WrapErr};
 use tracing::info;
 
 use crate::certs::CertManager;
-use crate::config::{AppConfig, NEOMIST_DATA_DIR_ENV, data_dir, save_config};
+use crate::config::{
+    AppConfig, NEOMIST_DATA_DIR_ENV, NEOMIST_REAL_USER_ENV, data_dir, runtime_user_home_dir,
+    save_config,
+};
 use crate::dns;
 
 const APPLICATIONS_DIR: &str = "/Applications";
 const CLI_LINK_PATH: &str = "/usr/local/bin/neomist";
 const NEOMIST_SKIP_SYSTEM_CERT_TRUST_ENV: &str = "NEOMIST_SKIP_SYSTEM_CERT_TRUST";
-const NEOMIST_REAL_USER_ENV: &str = "NEOMIST_REAL_USER";
 const START_ON_LOGIN_LABEL: &str = "eth.neomist.app";
 const LINUX_AUTOSTART_FILE_NAME: &str = "neomist.desktop";
 
@@ -180,7 +181,7 @@ fn install_system_for_current_exe_linux() -> Result<()> {
 }
 
 pub fn uninstall_cli_link() -> Result<()> {
-    if std::env::consts::OS == "macos" {
+    if std::env::consts::OS == "macos" && cli_link_matches_current_exe()? {
         remove_file_if_exists(Path::new(CLI_LINK_PATH))?;
     }
     Ok(())
@@ -503,16 +504,14 @@ fn macos_launch_agent_path() -> Result<PathBuf> {
 }
 
 fn linux_autostart_path() -> Result<PathBuf> {
-    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    Ok(base
-        .config_dir()
+    Ok(runtime_user_home_dir()?
+        .join(".config")
         .join("autostart")
         .join(LINUX_AUTOSTART_FILE_NAME))
 }
 
 fn user_home_dir() -> Result<PathBuf> {
-    let base = BaseDirs::new().wrap_err("Failed to resolve base directories")?;
-    Ok(base.home_dir().to_path_buf())
+    runtime_user_home_dir()
 }
 
 fn macos_launch_agent_contents(bundle_path: &Path) -> String {
@@ -676,6 +675,40 @@ fn install_cli_link(target: &Path) -> Result<()> {
         Ok(())
     } else {
         Err(eyre::eyre!("CLI symlink setup did not complete"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linux_autostart_path;
+    use crate::config::NEOMIST_REAL_USER_ENV;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn linux_autostart_path_uses_runtime_user_home() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("HOME", "/tmp/neomist-home-test");
+            std::env::set_var(NEOMIST_REAL_USER_ENV, "root");
+            std::env::set_var("SUDO_USER", "root");
+        }
+
+        assert_eq!(
+            linux_autostart_path().unwrap(),
+            PathBuf::from("/tmp/neomist-home-test/.config/autostart/neomist.desktop")
+        );
+
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::remove_var(NEOMIST_REAL_USER_ENV);
+            std::env::remove_var("SUDO_USER");
+        }
     }
 }
 
