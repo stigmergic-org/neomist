@@ -21,6 +21,7 @@ mod tray;
 
 use std::collections::VecDeque;
 use std::env;
+use std::fs;
 use std::process::Command;
 use std::sync::{Arc, mpsc};
 
@@ -36,7 +37,7 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::certs::CertManager;
 use crate::config::{
-    NEOMIST_DATA_DIR_ENV, cache_dir, config_path, data_dir, load_or_create_config,
+    NEOMIST_DATA_DIR_ENV, cache_dir, config_dir, config_path, data_dir, load_or_create_config,
 };
 use crate::state::AppState;
 
@@ -90,15 +91,18 @@ Options:
 const SYSTEM_UNINSTALL_HELP_TEXT: &str = "Uninstall NeoMist system integration
 
 Usage:
-  neomist system uninstall --yes
+  neomist system uninstall --yes [--purge]
 
 Does:
   removes DNS resolvers
   removes NeoMist certificate trust
   deletes generated certificate files
+  removes CLI link (/usr/local/bin/neomist on macOS)
+  removes autostart entry if present
 
 Options:
   --yes       Confirm uninstall (may require sudo)
+  --purge     Also delete all user data (IPFS repo, config, cache)
   -h, --help  Print help
 ";
 
@@ -107,7 +111,7 @@ enum CliCommand {
     ShowHelp(&'static str),
     ShowVersion(&'static str),
     SystemInstall,
-    SystemUninstall,
+    SystemUninstall { purge: bool },
 }
 
 enum ConfirmedCommand {
@@ -128,7 +132,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         CliCommand::SystemInstall => return install_system(),
-        CliCommand::SystemUninstall => return uninstall(),
+        CliCommand::SystemUninstall { purge } => return uninstall(purge),
     }
 
     if rustls::crypto::aws_lc_rs::default_provider()
@@ -220,15 +224,7 @@ fn parse_system_args(args: &[String]) -> Result<CliCommand> {
             ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
             ConfirmedCommand::Confirmed => Ok(CliCommand::SystemInstall),
         },
-        "uninstall" => match parse_confirmed_subcommand(
-            &args[1..],
-            SYSTEM_UNINSTALL_HELP_TEXT,
-            "System uninstall requires --yes",
-            "system uninstall",
-        )? {
-            ConfirmedCommand::ShowHelp(help_text) => Ok(CliCommand::ShowHelp(help_text)),
-            ConfirmedCommand::Confirmed => Ok(CliCommand::SystemUninstall),
-        },
+        "uninstall" => parse_uninstall_args(&args[1..]),
         unknown => Err(eyre::eyre!(
             "Unknown system subcommand: `{unknown}`\nRun `neomist system --help` for usage."
         )),
@@ -263,6 +259,39 @@ fn parse_confirmed_subcommand(
     }
 
     Ok(ConfirmedCommand::Confirmed)
+}
+
+fn parse_uninstall_args(args: &[String]) -> Result<CliCommand> {
+    if args.is_empty() {
+        return Err(eyre::eyre!(
+            "System uninstall requires --yes\nRun `neomist system uninstall --help` for usage."
+        ));
+    }
+
+    let mut confirmed = false;
+    let mut purge = false;
+    for arg in args {
+        match arg.as_str() {
+            "--yes" => confirmed = true,
+            "--purge" => purge = true,
+            "-h" | "--help" | "help" => {
+                return Ok(CliCommand::ShowHelp(SYSTEM_UNINSTALL_HELP_TEXT));
+            }
+            _ => {
+                return Err(eyre::eyre!(
+                    "Unknown option for system uninstall: `{arg}`\nRun `neomist system uninstall --help` for usage."
+                ));
+            }
+        }
+    }
+
+    if !confirmed {
+        return Err(eyre::eyre!(
+            "System uninstall requires --yes\nRun `neomist system uninstall --help` for usage."
+        ));
+    }
+
+    Ok(CliCommand::SystemUninstall { purge })
 }
 
 #[cfg(test)]
@@ -483,13 +512,13 @@ fn init_services(
     }
 }
 
-fn uninstall() -> Result<()> {
+fn uninstall(purge: bool) -> Result<()> {
     info!("Uninstalling DNS resolvers and certificates");
     let data_dir = data_dir()?;
     let running_as_root = current_user_is_root()?;
 
     if std::env::consts::OS == "linux" && !running_as_root {
-        prompt_linux_uninstall(&data_dir)?;
+        prompt_linux_uninstall(&data_dir, purge)?;
         info!("Uninstall complete");
         return Ok(());
     }
@@ -504,14 +533,32 @@ fn uninstall() -> Result<()> {
     }
 
     certs::uninstall_certs(&data_dir)?;
+    app_setup::uninstall_cli_link()?;
+    app_setup::uninstall_autostart()?;
+
+    if purge {
+        info!("Purging user data");
+        if data_dir.exists() {
+            fs::remove_dir_all(&data_dir).wrap_err("Failed to remove data directory")?;
+        }
+        let cfg_dir = config_dir()?;
+        if cfg_dir.exists() {
+            fs::remove_dir_all(&cfg_dir).wrap_err("Failed to remove config directory")?;
+        }
+        let cache = cache_dir()?;
+        if cache.exists() {
+            fs::remove_dir_all(&cache).wrap_err("Failed to remove cache directory")?;
+        }
+    }
+
     info!("Uninstall complete");
     Ok(())
 }
 
-fn prompt_linux_uninstall(data_dir: &std::path::Path) -> Result<()> {
+fn prompt_linux_uninstall(data_dir: &std::path::Path, purge: bool) -> Result<()> {
     let exe_path = env::current_exe().wrap_err("Failed to resolve current executable")?;
-    let output = Command::new("pkexec")
-        .arg("/usr/bin/env")
+    let mut cmd = Command::new("pkexec");
+    cmd.arg("/usr/bin/env")
         .arg(format!(
             "{NEOMIST_DATA_DIR_ENV}={}",
             data_dir.to_string_lossy()
@@ -519,7 +566,11 @@ fn prompt_linux_uninstall(data_dir: &std::path::Path) -> Result<()> {
         .arg(exe_path)
         .arg("system")
         .arg("uninstall")
-        .arg("--yes")
+        .arg("--yes");
+    if purge {
+        cmd.arg("--purge");
+    }
+    let output = cmd
         .output()
         .wrap_err("Failed to prompt for administrator access")?;
 

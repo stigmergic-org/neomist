@@ -179,6 +179,21 @@ fn install_system_for_current_exe_linux() -> Result<()> {
     Ok(())
 }
 
+pub fn uninstall_cli_link() -> Result<()> {
+    if std::env::consts::OS == "macos" {
+        remove_file_if_exists(Path::new(CLI_LINK_PATH))?;
+    }
+    Ok(())
+}
+
+pub fn uninstall_autostart() -> Result<()> {
+    match std::env::consts::OS {
+        "macos" => remove_file_if_exists(&macos_launch_agent_path()?),
+        "linux" => remove_file_if_exists(&linux_autostart_path()?),
+        _ => Ok(()),
+    }
+}
+
 pub fn sync_start_on_login(enabled: bool) -> Result<()> {
     match std::env::consts::OS {
         "macos" => sync_start_on_login_macos(enabled),
