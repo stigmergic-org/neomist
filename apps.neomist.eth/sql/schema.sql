@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS probes (
   x_ipfs_roots_json TEXT,
   title TEXT,
   icon_url TEXT,
+  manifest_url TEXT,
   fetch_error TEXT,
   body_bytes INTEGER NOT NULL DEFAULT 0,
   success INTEGER NOT NULL,

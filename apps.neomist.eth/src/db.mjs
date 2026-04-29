@@ -156,8 +156,8 @@ function createStore(db) {
           `INSERT INTO probes (
             node, name, root_cid, eth_link_url, probed_at, http_status, content_type,
             content_length, location_header, x_ipfs_path, x_ipfs_roots_json, title,
-            icon_url, fetch_error, body_bytes, success
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            icon_url, manifest_url, fetch_error, body_bytes, success
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             nodeRecord.node,
             nodeRecord.name,
@@ -172,6 +172,7 @@ function createStore(db) {
             JSON.stringify(probe.xIpfsRoots ?? []),
             probe.title,
             probe.iconUrl,
+            probe.manifestUrl,
             probe.fetchError,
             probe.bodyBytes,
             success,
@@ -251,10 +252,19 @@ function createStore(db) {
     listExportableNames() {
       return getAll(
         db,
-        `SELECT node, name, parent_name, is_subdomain
+        `SELECT names.node, names.name, names.parent_name, names.is_subdomain,
+                latest_probe.title, latest_probe.icon_url, latest_probe.manifest_url
          FROM names
-         WHERE last_probe_success = 1
-         ORDER BY lower(name) ASC`,
+         LEFT JOIN probes AS latest_probe
+           ON latest_probe.id = (
+             SELECT id
+             FROM probes
+             WHERE node = names.node
+             ORDER BY probed_at DESC, id DESC
+             LIMIT 1
+           )
+         WHERE names.last_probe_success = 1
+         ORDER BY lower(names.name) ASC`,
       );
     },
     listContenthashVersionsForNodes(nodes) {
@@ -277,6 +287,7 @@ function createStore(db) {
 function ensureSchemaMigrations(db) {
   ensureColumn(db, 'names', 'source_tx_hash', 'TEXT');
   ensureColumn(db, 'names', 'source_event_id', 'TEXT');
+  ensureColumn(db, 'probes', 'manifest_url', 'TEXT');
 }
 
 function ensureColumn(db, tableName, columnName, columnType) {

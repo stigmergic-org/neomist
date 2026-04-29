@@ -16,6 +16,9 @@ export async function exportIpfsTree(store, outputDir = PATHS.ipfsRootDir) {
       name: row.name,
       parent_name: row.parent_name,
       is_subdomain: Boolean(row.is_subdomain),
+      title: row.title,
+      icon_url: row.icon_url,
+      manifest_url: row.manifest_url,
       contenthashes: versionsByNode.get(row.node) ?? [],
     };
 

@@ -2,6 +2,27 @@ import { create as createKuboRpcClient } from 'kubo-rpc-client';
 
 const TEXT_DECODER = new TextDecoder();
 const INDEX_FILENAMES = ['index.html', 'index.htm'];
+const MANIFEST_FILENAMES = ['manifest.webmanifest', 'manifest.json', 'site.webmanifest'];
+const EXTENSION_CONTENT_TYPES = new Map([
+  ['.css', 'text/css'],
+  ['.gif', 'image/gif'],
+  ['.htm', 'text/html'],
+  ['.html', 'text/html'],
+  ['.ico', 'image/x-icon'],
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.js', 'text/javascript'],
+  ['.json', 'application/json'],
+  ['.mjs', 'text/javascript'],
+  ['.pdf', 'application/pdf'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.txt', 'text/plain; charset=utf-8'],
+  ['.wasm', 'application/wasm'],
+  ['.webmanifest', 'application/manifest+json'],
+  ['.webp', 'image/webp'],
+  ['.xml', 'application/xml'],
+]);
 
 export function createKuboProbeClient({ kuboRpcUrl } = {}) {
   return kuboRpcUrl ? createKuboRpcClient(kuboRpcUrl) : createKuboRpcClient();
@@ -40,10 +61,17 @@ export async function probeKuboName(nameRecord, { timeoutMs, maxBytes, kuboClien
     });
   }
 
-  const htmlInfo = extractBasicHtmlInfo(
-    bodyData.buffer.length > 0 ? TEXT_DECODER.decode(bodyData.buffer) : '',
+  const html = bodyData.buffer.length > 0 ? TEXT_DECODER.decode(bodyData.buffer) : '';
+  const htmlInfo = extractBasicHtmlInfo(html, contentUrl);
+  const manifestUrl = await findManifestUrl({
+    client,
+    html,
     contentUrl,
-  );
+    kuboPath,
+    rootIsDirectory: stat.type === 'directory',
+    timeoutMs,
+  });
+
   return {
     name: nameRecord.name,
     ethLinkUrl: contentUrl,
@@ -57,6 +85,7 @@ export async function probeKuboName(nameRecord, { timeoutMs, maxBytes, kuboClien
     xIpfsRoots: [nameRecord.root_cid],
     title: htmlInfo.title,
     iconUrl: htmlInfo.iconUrl,
+    manifestUrl,
     fetchError: null,
     bodyBytes: bodyData.bodyBytes,
   };
@@ -76,6 +105,7 @@ function failedProbe({ name, contentUrl, fetchError, bodyBytes = 0 }) {
     xIpfsRoots: [],
     title: null,
     iconUrl: null,
+    manifestUrl: null,
     fetchError,
     bodyBytes,
   };
@@ -155,17 +185,88 @@ async function readKuboFileWithCap(client, kuboPath, { timeoutMs, maxBytes }) {
     chunks.push(chunk);
   }
 
+  const buffer = Buffer.concat(chunks);
+
   return {
-    buffer: Buffer.concat(chunks),
+    buffer,
     bodyBytes,
     path: kuboPath,
-    contentType: inferContentType(kuboPath),
+    contentType: inferContentType(kuboPath, buffer),
     error: null,
   };
 }
 
-function inferContentType(kuboPath) {
-  return /\.html?$/iu.test(kuboPath) ? 'text/html' : null;
+function inferContentType(kuboPath, buffer) {
+  const lowerPath = String(kuboPath).toLowerCase();
+  for (const [extension, contentType] of EXTENSION_CONTENT_TYPES) {
+    if (lowerPath.endsWith(extension)) {
+      return contentType;
+    }
+  }
+
+  return sniffContentType(buffer);
+}
+
+function sniffContentType(buffer) {
+  if (buffer.length === 0) {
+    return null;
+  }
+
+  if (hasPrefix(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return 'image/png';
+  }
+  if (hasPrefix(buffer, [0xff, 0xd8, 0xff])) {
+    return 'image/jpeg';
+  }
+  if (hasAsciiPrefix(buffer, 'GIF87a') || hasAsciiPrefix(buffer, 'GIF89a')) {
+    return 'image/gif';
+  }
+  if (hasAsciiPrefix(buffer, '%PDF-')) {
+    return 'application/pdf';
+  }
+  if (buffer.length >= 12 && hasAsciiPrefix(buffer, 'RIFF') && buffer.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return 'image/webp';
+  }
+
+  const text = TEXT_DECODER.decode(buffer.subarray(0, Math.min(buffer.length, 4096))).replace(/^\uFEFF/u, '').trimStart();
+  if (/^[{[]/u.test(text)) {
+    return 'application/json';
+  }
+  if (/^(?:<!doctype\s+html|<html[\s>])/iu.test(text)) {
+    return 'text/html';
+  }
+  if (/^(?:<svg[\s>]|<\?xml[\s\S]{0,512}<svg[\s>])/iu.test(text)) {
+    return 'image/svg+xml';
+  }
+  if (/^<\?xml/iu.test(text)) {
+    return 'application/xml';
+  }
+  if (isLikelyUtf8Text(buffer)) {
+    return 'text/plain; charset=utf-8';
+  }
+
+  return null;
+}
+
+function hasPrefix(buffer, bytes) {
+  if (buffer.length < bytes.length) {
+    return false;
+  }
+  return bytes.every((byte, index) => buffer[index] === byte);
+}
+
+function hasAsciiPrefix(buffer, value) {
+  return buffer.length >= value.length && buffer.subarray(0, value.length).toString('ascii') === value;
+}
+
+function isLikelyUtf8Text(buffer) {
+  const sample = buffer.subarray(0, Math.min(buffer.length, 512));
+  for (const byte of sample) {
+    if (byte === 0 || (byte < 0x08) || (byte > 0x0d && byte < 0x20)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function statSize(stat) {
@@ -215,18 +316,43 @@ function extractBasicHtmlInfo(html, baseUrl) {
   }
 
   const title = firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
-  const iconUrl = extractIconUrl(html, baseUrl);
+  const iconUrl = extractLinkUrl(html, baseUrl, (relTokens) => relTokens.some((token) => token.includes('icon')));
   return { title, iconUrl };
 }
 
-function extractIconUrl(html, baseUrl) {
-  const matches = [...html.matchAll(/<link\b[^>]*rel=(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*href=(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi)];
-  for (const match of matches) {
-    const rel = (match[1] || match[2] || match[3] || '').toLowerCase();
-    const href = match[4] || match[5] || match[6] || '';
-    if (!rel.includes('icon') || !href) {
+async function findManifestUrl({ client, html, contentUrl, kuboPath, rootIsDirectory, timeoutMs }) {
+  const linkedManifestUrl = extractLinkUrl(html, contentUrl, (relTokens) => relTokens.includes('manifest'));
+  if (linkedManifestUrl) {
+    return linkedManifestUrl;
+  }
+
+  if (!rootIsDirectory) {
+    return null;
+  }
+
+  for (const fileName of MANIFEST_FILENAMES) {
+    const manifestPath = joinKuboPath(kuboPath, fileName);
+    try {
+      await client.files.stat(manifestPath, { timeout: timeoutMs });
+      return new URL(fileName, contentUrl).toString();
+    } catch {
       continue;
     }
+  }
+
+  return null;
+}
+
+function extractLinkUrl(html, baseUrl, relPredicate) {
+  const matches = html.matchAll(/<link\b[^>]*>/gi);
+  for (const match of matches) {
+    const attrs = parseHtmlAttributes(match[0]);
+    const relTokens = String(attrs.rel ?? '').toLowerCase().split(/\s+/u).filter(Boolean);
+    const href = attrs.href ?? '';
+    if (!href || !relPredicate(relTokens)) {
+      continue;
+    }
+
     try {
       const resolved = new URL(href, baseUrl);
       if (['http:', 'https:', 'ipfs:', 'ipns:'].includes(resolved.protocol)) {
@@ -237,6 +363,15 @@ function extractIconUrl(html, baseUrl) {
     }
   }
   return null;
+}
+
+function parseHtmlAttributes(tag) {
+  const attrs = {};
+  const matches = tag.matchAll(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g);
+  for (const match of matches) {
+    attrs[match[1].toLowerCase()] = match[2] ?? match[3] ?? match[4] ?? '';
+  }
+  return attrs;
 }
 
 function firstMatch(value, regex) {
