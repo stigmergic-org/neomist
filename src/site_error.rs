@@ -3,6 +3,7 @@ use axum::http::{
     HeaderMap, Response, StatusCode,
     header::{CACHE_CONTROL, CONTENT_TYPE},
 };
+use url::form_urlencoded;
 
 pub(crate) fn prefers_html_error_page(headers: &HeaderMap) -> bool {
     let wants_document = headers
@@ -95,6 +96,14 @@ fn build_html_error_response(
     );
     let path = if path.is_empty() { "/" } else { path };
     let request_target = format!("https://{host}{path}");
+    let ens_app_action = ens_app_url(host)
+        .map(|url| {
+            format!(
+                r#"<a class="vapor-button-secondary" href="{}">Open in ENS app</a>"#,
+                escape_html(&url)
+            )
+        })
+        .unwrap_or_default();
     let detail_block = detail
         .filter(|value| !value.trim().is_empty())
         .map(|value| {
@@ -516,6 +525,7 @@ fn build_html_error_response(
 
         <div class="actions">
           <button class="vapor-button-secondary" type="button" onclick="window.location.reload()">Retry this page</button>
+          {ens_app_action}
           <a class="vapor-button-primary" href="https://neomist.localhost">Open NeoMist dashboard</a>
         </div>
       </section>
@@ -527,6 +537,7 @@ fn build_html_error_response(
         summary = escape_html(summary),
         status_text = escape_html(&status_text),
         request_target = escape_html(&request_target),
+        ens_app_action = ens_app_action,
         detail_block = detail_block,
     );
 
@@ -559,6 +570,16 @@ fn build_text_error_response(
         .header(CACHE_CONTROL, "no-store")
         .body(Body::from(body))
         .unwrap()
+}
+
+fn ens_app_url(host: &str) -> Option<String> {
+    let normalized = host.trim().trim_end_matches('.');
+    if normalized.is_empty() || !normalized.to_ascii_lowercase().ends_with(".eth") {
+        return None;
+    }
+
+    let encoded: String = form_urlencoded::byte_serialize(normalized.as_bytes()).collect();
+    Some(format!("https://ens.eth/profile/?name={encoded}"))
 }
 
 fn escape_html(value: &str) -> String {
@@ -688,8 +709,8 @@ fn truncate_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_site_error_response, error_body_looks_like_html, prefers_html_error_page,
-        summarize_error_detail,
+        build_site_error_response, ens_app_url, error_body_looks_like_html,
+        prefers_html_error_page, summarize_error_detail,
     };
     use axum::body::to_bytes;
     use axum::http::{
@@ -776,6 +797,36 @@ mod tests {
         assert!(body.contains("example.eth"));
         assert!(body.contains("gateway timeout"));
         assert!(body.contains("Retry this page"));
+        assert!(body.contains("Open in ENS app"));
+        assert!(body.contains("https://ens.eth/profile/?name=example.eth"));
         assert!(body.contains("Open NeoMist dashboard"));
+    }
+
+    #[tokio::test]
+    async fn omits_ens_app_link_for_non_eth_hosts() {
+        let response = build_site_error_response(
+            StatusCode::BAD_GATEWAY,
+            true,
+            "Content load failed",
+            "NeoMist could not load content from local Kubo gateway.",
+            Some("gateway timeout"),
+            "example.wei",
+            "/",
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!body.contains("Open in ENS app"));
+        assert!(!body.contains("https://ens.eth/profile/?name=example.wei"));
+    }
+
+    #[test]
+    fn builds_ens_app_url_only_for_eth_names() {
+        assert_eq!(
+            ens_app_url("scottrepreneur.eth"),
+            Some("https://ens.eth/profile/?name=scottrepreneur.eth".to_string())
+        );
+        assert_eq!(ens_app_url("example.wei"), None);
+        assert_eq!(ens_app_url(""), None);
     }
 }
