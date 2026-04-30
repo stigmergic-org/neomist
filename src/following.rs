@@ -39,14 +39,12 @@ pub async fn run_following_loop(state: AppState, mut synced_rx: Receiver<()>) {
 
         let followed_domains = domains.into_iter().filter(|d| d.auto_seeding);
 
-        let provider = state.ens_provider.clone();
-
         for domain in followed_domains {
             info!("Following: checking {}", domain.domain);
-            match ens::resolve_contenthash(&provider, &domain.domain).await {
-                Ok(Some(contenthash)) => {
+            match ens::resolve_contenthash(&state, &domain.domain).await {
+                Ok(Some(metadata)) => {
                     if let Err(err) =
-                        cache::write_contenthash_metadata(&state, &domain.domain, &contenthash).await
+                        cache::write_contenthash_metadata(&state, &domain.domain, &metadata).await
                     {
                         warn!(
                             "Following: failed to write contenthash metadata for {}: {err}",
@@ -54,10 +52,14 @@ pub async fn run_following_loop(state: AppState, mut synced_rx: Receiver<()>) {
                         );
                     }
 
-                    match ens::update_mfs_cache(&state, &domain.domain, &contenthash).await {
+                    match ens::update_mfs_cache(&state, &domain.domain, &metadata.contenthash).await {
                         Ok(true) => {
-                            info!("Following: updating {} to {}", domain.domain, contenthash.target());
-                            if let Err(err) = ens::pin_content(&state, &contenthash).await {
+                            info!(
+                                "Following: updating {} to {}",
+                                domain.domain,
+                                metadata.contenthash.target()
+                            );
+                            if let Err(err) = ens::pin_content(&state, &metadata.contenthash).await {
                                 warn!(
                                     "Following: failed to pin new content for {}: {err}",
                                     domain.domain

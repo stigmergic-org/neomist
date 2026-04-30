@@ -1,7 +1,10 @@
+use alloy::contract::Error as ContractError;
 use alloy::ens::{ENS_ADDRESS, namehash};
 use alloy::primitives::{Address, B256, Bytes as AlloyBytes, address, keccak256};
-use alloy::providers::DynProvider;
+use alloy::providers::{DynProvider, Provider};
+use alloy::rpc::types::TransactionRequest;
 use alloy::sol;
+use alloy::sol_types::{SolCall, SolError};
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode, header::HOST};
 use eyre::{Report, Result, WrapErr};
@@ -28,10 +31,30 @@ sol! {
     }
 
     #[sol(rpc)]
+    interface EnsExtendedResolver {
+        function supportsInterface(bytes4 interfaceId) view returns (bool);
+        function resolve(bytes name, bytes data) view returns (bytes);
+    }
+
+    #[sol(rpc)]
     contract WeiNameService {
         function addr(bytes32 node) view returns (address);
         function contenthash(bytes32 node) view returns (bytes);
     }
+
+    #[sol(rpc)]
+    interface OffchainLookupCallback {
+        function resolveWithProof(bytes response, bytes extra_data) view returns (bytes);
+    }
+
+    #[derive(Debug)]
+    error OffchainLookup(
+        address sender,
+        string[] urls,
+        bytes call_data,
+        bytes4 callback_function,
+        bytes extra_data
+    );
 }
 
 const WEI_NODE: B256 =
@@ -54,9 +77,19 @@ const OFFLINE_LOOKUP_PATTERNS: &[&str] = &[
 ];
 const HELIOS_SYNC_LOOKUP_PATTERNS: &[&str] = &["out of sync", "seconds behind"];
 const LOOKUP_RETRY_DELAYS_MS: &[u64] = &[300, 1000];
+const ENSIP10_INTERFACE_ID: [u8; 4] = 0x9061b923_u32.to_be_bytes();
+const MAX_CCIP_REDIRECTS: usize = 4;
 
 const IPFS_CODEC: u64 = 0xe3;
 const IPNS_CODEC: u64 = 0xe5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContenthashResolution {
+    #[default]
+    Onchain,
+    CcipRead,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "protocol", content = "target", rename_all = "lowercase")]
@@ -87,12 +120,55 @@ impl ResolvedContenthash {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedContenthashMetadata {
+    pub contenthash: ResolvedContenthash,
+    #[serde(default)]
+    pub resolution: ContenthashResolution,
+}
+
+impl ResolvedContenthashMetadata {
+    fn new(contenthash: ResolvedContenthash, resolution: ContenthashResolution) -> Self {
+        Self {
+            contenthash,
+            resolution,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContenthashRecord {
     Missing,
     Supported(ResolvedContenthash),
     UnsupportedCodec(u64),
     Invalid(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContenthashLookup {
+    record: ContenthashRecord,
+    resolution: ContenthashResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolverCallOutcome {
+    data: AlloyBytes,
+    used_ccip_read: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GatewayRequest {
+    sender: Address,
+    urls: Vec<String>,
+    call_data: AlloyBytes,
+    callback_selector: [u8; 4],
+    extra_data: AlloyBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ensip10Resolution<T> {
+    value: T,
+    resolution: ContenthashResolution,
 }
 
 pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response<Body> {
@@ -110,9 +186,19 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
     let query = parts.uri.query();
     let wants_html_error_page = site_error::prefers_html_error_page(&parts.headers);
 
-    let (contenthash, refresh_cache) = match resolve_contenthash_record(&state.ens_provider, ens_name).await {
-        Ok(ContenthashRecord::Supported(contenthash)) => (contenthash, true),
-        Ok(ContenthashRecord::Missing) => {
+    let (contenthash, contenthash_metadata, refresh_cache) =
+        match resolve_contenthash_record(state, ens_name).await {
+            Ok(ContenthashLookup {
+                record: ContenthashRecord::Supported(contenthash),
+                resolution,
+            }) => {
+                let metadata = ResolvedContenthashMetadata::new(contenthash.clone(), resolution);
+                (contenthash, Some(metadata), true)
+            }
+            Ok(ContenthashLookup {
+                record: ContenthashRecord::Missing,
+                ..
+            }) => {
             return site_error::build_site_error_response(
                 StatusCode::NOT_FOUND,
                 wants_html_error_page,
@@ -122,8 +208,11 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
                 ens_name,
                 path,
             );
-        }
-        Ok(ContenthashRecord::UnsupportedCodec(codec)) => {
+            }
+            Ok(ContenthashLookup {
+                record: ContenthashRecord::UnsupportedCodec(codec),
+                ..
+            }) => {
             let detail = format!(
                 "Unsupported contenthash codec 0x{codec:x}. NeoMist currently supports only IPFS and IPNS contenthash records."
             );
@@ -136,8 +225,11 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
                 ens_name,
                 path,
             );
-        }
-        Ok(ContenthashRecord::Invalid(reason)) => {
+            }
+            Ok(ContenthashLookup {
+                record: ContenthashRecord::Invalid(reason),
+                ..
+            }) => {
             let detail = format!("Contenthash record is malformed: {reason}");
             return site_error::build_site_error_response(
                 StatusCode::BAD_GATEWAY,
@@ -148,58 +240,59 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
                 ens_name,
                 path,
             );
-        }
-        Err(err) => {
-            if is_offline_lookup_error(&err) {
-                match latest_cached_cid(state, ens_name).await {
-                    Ok(Some(cid)) => {
-                        warn!(
-                            "ENS lookup failed for {ens_name} while offline, using cached CID {cid}: {err:?}"
-                        );
-                        (ResolvedContenthash::Ipfs(cid), false)
-                    }
-                    Ok(None) => {
-                        warn!(
-                            "ENS lookup failed for {ens_name} while offline and no cached record is available: {err:?}"
-                        );
-                        let detail = format!("Failed to resolve contenthash while offline: {err:#}");
-                        return ens_lookup_failed_response(
-                            ens_name,
-                            path,
-                            wants_html_error_page,
-                            Some(&detail),
-                        );
-                    }
-                    Err(cache_err) => {
-                        warn!(
-                            "ENS lookup failed for {ens_name} and cached fallback lookup failed: {err:?}; cache error: {cache_err:?}"
-                        );
-                        let detail = format!(
-                            "Failed to resolve contenthash while offline: {err:#}. Cached fallback also failed: {cache_err:#}"
-                        );
-                        return ens_lookup_failed_response(
-                            ens_name,
-                            path,
-                            wants_html_error_page,
-                            Some(&detail),
-                        );
-                    }
-                }
-            } else {
-                warn!("ENS lookup failed for {ens_name}: {err:?}");
-                let detail = format!("{err:#}");
-                return ens_lookup_failed_response(
-                    ens_name,
-                    path,
-                    wants_html_error_page,
-                    Some(&detail),
-                );
             }
-        }
-    };
+            Err(err) => {
+                if is_offline_lookup_error(&err) {
+                    match latest_cached_cid(state, ens_name).await {
+                        Ok(Some(cid)) => {
+                            warn!(
+                                "ENS lookup failed for {ens_name} while offline, using cached CID {cid}: {err:?}"
+                            );
+                            (ResolvedContenthash::Ipfs(cid), None, false)
+                        }
+                        Ok(None) => {
+                            warn!(
+                                "ENS lookup failed for {ens_name} while offline and no cached record is available: {err:?}"
+                            );
+                            let detail = format!("Failed to resolve contenthash while offline: {err:#}");
+                            return ens_lookup_failed_response(
+                                ens_name,
+                                path,
+                                wants_html_error_page,
+                                Some(&detail),
+                            );
+                        }
+                        Err(cache_err) => {
+                            warn!(
+                                "ENS lookup failed for {ens_name} and cached fallback lookup failed: {err:?}; cache error: {cache_err:?}"
+                            );
+                            let detail = format!(
+                                "Failed to resolve contenthash while offline: {err:#}. Cached fallback also failed: {cache_err:#}"
+                            );
+                            return ens_lookup_failed_response(
+                                ens_name,
+                                path,
+                                wants_html_error_page,
+                                Some(&detail),
+                            );
+                        }
+                    }
+                } else {
+                    warn!("ENS lookup failed for {ens_name}: {err:?}");
+                    let detail = format!("{err:#}");
+                    return ens_lookup_failed_response(
+                        ens_name,
+                        path,
+                        wants_html_error_page,
+                        Some(&detail),
+                    );
+                }
+            }
+        };
 
     if refresh_cache
-        && let Err(err) = crate::cache::write_contenthash_metadata(state, ens_name, &contenthash).await
+        && let Some(metadata) = contenthash_metadata.as_ref()
+        && let Err(err) = crate::cache::write_contenthash_metadata(state, ens_name, metadata).await
     {
         warn!("Contenthash metadata update failed for {ens_name}: {err}");
     }
@@ -688,15 +781,12 @@ fn inspect_contenthash(bytes: &AlloyBytes) -> ContenthashRecord {
     }
 }
 
-async fn resolve_contenthash_record(
-    provider: &DynProvider,
-    host: &str,
-) -> Result<ContenthashRecord> {
+async fn resolve_contenthash_record(state: &AppState, host: &str) -> Result<ContenthashLookup> {
     with_lookup_retries(host, "contenthash", || async {
         if host.ends_with(".wei") {
-            resolve_wei_contenthash_record_once(provider, host).await
+            resolve_wei_contenthash_record_once(state.ens_provider.as_ref(), host).await
         } else {
-            resolve_ens_contenthash_record_once(provider, host).await
+            resolve_ens_contenthash_record_once(state, host).await
         }
     })
     .await
@@ -733,33 +823,38 @@ fn decode_varint(bytes: &AlloyBytes) -> Option<(u64, usize)> {
 }
 
 pub async fn resolve_contenthash(
-    provider: &DynProvider,
+    state: &AppState,
     host: &str,
-) -> Result<Option<ResolvedContenthash>> {
-    Ok(match resolve_contenthash_record(provider, host).await? {
-        ContenthashRecord::Supported(contenthash) => Some(contenthash),
-        ContenthashRecord::Missing
-        | ContenthashRecord::UnsupportedCodec(_)
-        | ContenthashRecord::Invalid(_) => None,
+) -> Result<Option<ResolvedContenthashMetadata>> {
+    Ok(match resolve_contenthash_record(state, host).await? {
+        ContenthashLookup {
+            record: ContenthashRecord::Supported(contenthash),
+            resolution,
+        } => Some(ResolvedContenthashMetadata::new(contenthash, resolution)),
+        ContenthashLookup {
+            record:
+                ContenthashRecord::Missing
+                | ContenthashRecord::UnsupportedCodec(_)
+                | ContenthashRecord::Invalid(_),
+            ..
+        } => None,
     })
 }
 
-pub async fn resolve_address(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
+pub async fn resolve_address(state: &AppState, host: &str) -> Result<Option<Address>> {
     with_lookup_retries(host, "address", || async {
         if host.ends_with(".wei") {
-            resolve_wei_address_once(provider, host).await
+            resolve_wei_address_once(state.ens_provider.as_ref(), host).await
         } else {
-            resolve_ens_address_once(provider, host).await
+            resolve_ens_address_once(state, host).await
         }
     })
     .await
 }
 
-async fn resolve_ens_contenthash_record_once(
-    provider: &DynProvider,
-    ens_name: &str,
-) -> Result<ContenthashRecord> {
+async fn resolve_ens_contenthash_record_once(state: &AppState, ens_name: &str) -> Result<ContenthashLookup> {
     let node: B256 = namehash(ens_name);
+    let provider = state.ens_provider.as_ref();
     let registry = EnsRegistry::new(ENS_ADDRESS, provider);
     let resolver_addr: Address = registry
         .resolver(node)
@@ -768,7 +863,29 @@ async fn resolve_ens_contenthash_record_once(
         .wrap_err("Failed to resolve ENS resolver address")?;
 
     if resolver_addr == Address::ZERO {
-        return Ok(ContenthashRecord::Missing);
+        return Ok(ContenthashLookup {
+            record: ContenthashRecord::Missing,
+            resolution: ContenthashResolution::Onchain,
+        });
+    }
+
+    if resolver_supports_ensip10(provider, resolver_addr)
+        .await
+        .wrap_err("Failed to determine ENSIP-10 support for ENS resolver")?
+    {
+        let resolved = resolve_ensip10_call(
+            state,
+            resolver_addr,
+            ens_name,
+            EnsResolver::contenthashCall { node },
+        )
+        .await
+        .wrap_err("Failed to resolve ENS contenthash via ENSIP-10")?;
+
+        return Ok(ContenthashLookup {
+            record: inspect_contenthash(&resolved.value),
+            resolution: resolved.resolution,
+        });
     }
 
     let resolver = EnsResolver::new(resolver_addr, provider);
@@ -778,11 +895,15 @@ async fn resolve_ens_contenthash_record_once(
         .await
         .wrap_err("Failed to resolve ENS contenthash")?;
 
-    Ok(inspect_contenthash(&contenthash))
+    Ok(ContenthashLookup {
+        record: inspect_contenthash(&contenthash),
+        resolution: ContenthashResolution::Onchain,
+    })
 }
 
-async fn resolve_ens_address_once(provider: &DynProvider, ens_name: &str) -> Result<Option<Address>> {
+async fn resolve_ens_address_once(state: &AppState, ens_name: &str) -> Result<Option<Address>> {
     let node: B256 = namehash(ens_name);
+    let provider = state.ens_provider.as_ref();
     let registry = EnsRegistry::new(ENS_ADDRESS, provider);
     let resolver_addr: Address = registry
         .resolver(node)
@@ -792,6 +913,22 @@ async fn resolve_ens_address_once(provider: &DynProvider, ens_name: &str) -> Res
 
     if resolver_addr == Address::ZERO {
         return Ok(None);
+    }
+
+    if resolver_supports_ensip10(provider, resolver_addr)
+        .await
+        .wrap_err("Failed to determine ENSIP-10 support for ENS resolver")?
+    {
+        let resolved = resolve_ensip10_call(
+            state,
+            resolver_addr,
+            ens_name,
+            EnsResolver::addrCall { node },
+        )
+        .await
+        .wrap_err("Failed to resolve ENS address via ENSIP-10")?;
+
+        return Ok((resolved.value != Address::ZERO).then_some(resolved.value));
     }
 
     let resolver = EnsResolver::new(resolver_addr, provider);
@@ -804,10 +941,276 @@ async fn resolve_ens_address_once(provider: &DynProvider, ens_name: &str) -> Res
     Ok((address != Address::ZERO).then_some(address))
 }
 
+async fn resolver_supports_ensip10(provider: &DynProvider, resolver_addr: Address) -> Result<bool> {
+    match EnsExtendedResolver::new(resolver_addr, provider)
+        .supportsInterface(ENSIP10_INTERFACE_ID.into())
+        .call()
+        .await
+    {
+        Ok(supported) => Ok(supported),
+        Err(ContractError::ZeroData(_, _)) => Ok(false),
+        Err(err) => Err(err).wrap_err("ENSIP-10 support probe failed"),
+    }
+}
+
+async fn resolve_ensip10_call<T>(
+    state: &AppState,
+    resolver_addr: Address,
+    ens_name: &str,
+    inner_call: T,
+) -> Result<Ensip10Resolution<T::Return>>
+where
+    T: SolCall,
+{
+    let dns_name = dns_encode_name(ens_name)?;
+    let resolve_call = EnsExtendedResolver::resolveCall {
+        name: dns_name,
+        data: AlloyBytes::from(inner_call.abi_encode()),
+    };
+    let outcome = call_with_offchain_lookup(
+        state,
+        resolver_addr,
+        AlloyBytes::from(resolve_call.abi_encode()),
+    )
+    .await?;
+    let encoded_value = EnsExtendedResolver::resolveCall::abi_decode_returns(outcome.data.as_ref())
+        .wrap_err("Failed to decode ENSIP-10 resolve() response")?;
+    let value = T::abi_decode_returns(encoded_value.as_ref())
+        .wrap_err("Failed to decode ENSIP-10 inner response")?;
+
+    Ok(Ensip10Resolution {
+        value,
+        resolution: if outcome.used_ccip_read {
+            ContenthashResolution::CcipRead
+        } else {
+            ContenthashResolution::Onchain
+        },
+    })
+}
+
+async fn call_with_offchain_lookup(
+    state: &AppState,
+    target: Address,
+    call_data: AlloyBytes,
+) -> Result<ResolverCallOutcome> {
+    let mut current_target = target;
+    let mut current_call_data = call_data;
+    let mut used_ccip_read = false;
+
+    for redirect in 0..=MAX_CCIP_REDIRECTS {
+        let tx = TransactionRequest::default()
+            .to(current_target)
+            .input(current_call_data.clone().into());
+
+        match state
+            .ens_provider
+            .call(tx)
+            .latest()
+            .await
+            .map_err(ContractError::from)
+        {
+            Ok(data) => {
+                return Ok(ResolverCallOutcome {
+                    data,
+                    used_ccip_read,
+                });
+            }
+            Err(err) => {
+                let Some(request) = decode_offchain_lookup(&err) else {
+                    return Err(err).wrap_err("Resolver call failed");
+                };
+
+                if redirect == MAX_CCIP_REDIRECTS {
+                    return Err(eyre::eyre!(
+                        "Resolver offchain lookup exceeded {MAX_CCIP_REDIRECTS} redirects"
+                    ));
+                }
+
+                current_target = request.sender;
+                current_call_data = build_callback_call_data(
+                    fetch_offchain_lookup_response(state, &request).await?,
+                    request.callback_selector,
+                    &request.extra_data,
+                );
+                used_ccip_read = true;
+            }
+        }
+    }
+
+    unreachable!("CCIP-read loop must return on success or final error")
+}
+
+fn decode_offchain_lookup(err: &ContractError) -> Option<GatewayRequest> {
+    let lookup = err
+        .as_decoded_error::<OffchainLookup>()
+        .or_else(|| decode_offchain_lookup_from_message(err))?;
+    Some(GatewayRequest {
+        sender: lookup.sender,
+        urls: lookup.urls,
+        call_data: lookup.call_data,
+        callback_selector: <[u8; 4]>::from(lookup.callback_function),
+        extra_data: lookup.extra_data,
+    })
+}
+
+fn decode_offchain_lookup_from_message(err: &ContractError) -> Option<OffchainLookup> {
+    let message = match err {
+        ContractError::TransportError(transport) => transport.as_error_resp()?.message.as_ref(),
+        _ => return None,
+    };
+    let revert_data = extract_revert_data_from_message(message)?;
+    OffchainLookup::abi_decode(revert_data.as_ref()).ok()
+}
+
+fn extract_revert_data_from_message(message: &str) -> Option<AlloyBytes> {
+    let revert = message.split("execution reverted:").nth(1)?.trim();
+    let revert = revert.strip_prefix("0x").unwrap_or(revert);
+    if revert.is_empty() || !revert.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let prefixed = format!("0x{revert}");
+    prefixed.parse::<AlloyBytes>().ok()
+}
+
+async fn fetch_offchain_lookup_response(
+    state: &AppState,
+    request: &GatewayRequest,
+) -> Result<AlloyBytes> {
+    let mut last_err: Option<Report> = None;
+
+    for url in &request.urls {
+        match fetch_offchain_lookup_url(state, url, request).await {
+            Ok(response) => return Ok(response),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    match last_err {
+        Some(err) => Err(err).wrap_err("All CCIP-read gateway URLs failed"),
+        None => Err(eyre::eyre!("Offchain lookup returned no gateway URLs")),
+    }
+}
+
+async fn fetch_offchain_lookup_url(
+    state: &AppState,
+    url: &str,
+    request: &GatewayRequest,
+) -> Result<AlloyBytes> {
+    let sender_hex = format!("{:#x}", request.sender);
+    let data_hex = format!("0x{}", hex::encode(request.call_data.as_ref()));
+
+    let response = if url.contains("{sender}") || url.contains("{data}") {
+        let expanded = url
+            .replace("{sender}", &sender_hex)
+            .replace("{data}", &data_hex);
+        state
+            .http_client
+            .get(expanded)
+            .send()
+            .await
+            .wrap_err("Failed to fetch CCIP-read gateway URL")?
+    } else {
+        state
+            .http_client
+            .post(url)
+            .json(&serde_json::json!({
+                "sender": sender_hex,
+                "data": data_hex,
+            }))
+            .send()
+            .await
+            .wrap_err("Failed to post CCIP-read gateway request")?
+    };
+
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .wrap_err("Failed to read CCIP-read gateway response")?;
+
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&body);
+        return Err(eyre::eyre!(
+            "CCIP-read gateway returned status {}: {}",
+            status,
+            detail.trim()
+        ));
+    }
+
+    decode_gateway_response_body(&body)
+}
+
+fn decode_gateway_response_body(body: &[u8]) -> Result<AlloyBytes> {
+    if body.is_empty() {
+        return Err(eyre::eyre!("CCIP-read gateway returned empty response body"));
+    }
+
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(data) = value.get("data").and_then(|entry| entry.as_str()) {
+            return data
+                .parse::<AlloyBytes>()
+                .wrap_err("CCIP-read gateway JSON response contained invalid hex data");
+        }
+
+        if let Some(data) = value.as_str() {
+            return data
+                .parse::<AlloyBytes>()
+                .wrap_err("CCIP-read gateway JSON string contained invalid hex data");
+        }
+    }
+
+    let text = String::from_utf8_lossy(body);
+    let trimmed = text.trim();
+    if trimmed.starts_with("0x") {
+        return trimmed
+            .parse::<AlloyBytes>()
+            .wrap_err("CCIP-read gateway response contained invalid hex data");
+    }
+
+    Ok(AlloyBytes::from(body.to_vec()))
+}
+
+fn build_callback_call_data(
+    response: AlloyBytes,
+    callback_selector: [u8; 4],
+    extra_data: &AlloyBytes,
+) -> AlloyBytes {
+    let mut data = OffchainLookupCallback::resolveWithProofCall {
+        response,
+        extra_data: extra_data.clone(),
+    }
+    .abi_encode();
+    data[..4].copy_from_slice(&callback_selector);
+    AlloyBytes::from(data)
+}
+
+fn dns_encode_name(name: &str) -> Result<AlloyBytes> {
+    if name.is_empty() {
+        return Err(eyre::eyre!("ENS name cannot be empty"));
+    }
+
+    let mut encoded = Vec::with_capacity(name.len() + 2);
+    for label in name.split('.') {
+        if label.is_empty() {
+            return Err(eyre::eyre!("ENS name contains empty label"));
+        }
+        if label.len() > 63 {
+            return Err(eyre::eyre!("ENS label too long for DNS encoding"));
+        }
+
+        encoded.push(label.len() as u8);
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+
+    Ok(AlloyBytes::from(encoded))
+}
+
 async fn resolve_wei_contenthash_record_once(
     provider: &DynProvider,
     host: &str,
-) -> Result<ContenthashRecord> {
+) -> Result<ContenthashLookup> {
     let node = wei_namehash(host);
     let contract = WeiNameService::new(WEI_REGISTRY, provider);
     let contenthash = contract
@@ -816,7 +1219,10 @@ async fn resolve_wei_contenthash_record_once(
         .await
         .wrap_err("Failed to resolve .wei contenthash")?;
 
-    Ok(inspect_contenthash(&contenthash))
+    Ok(ContenthashLookup {
+        record: inspect_contenthash(&contenthash),
+        resolution: ContenthashResolution::Onchain,
+    })
 }
 
 async fn resolve_wei_address_once(provider: &DynProvider, host: &str) -> Result<Option<Address>> {
@@ -867,9 +1273,11 @@ fn wei_namehash(name: &str) -> B256 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContenthashRecord, IPFS_CODEC, IPNS_CODEC, ResolvedContenthash,
-        decode_contenthash, inspect_contenthash, looks_like_offline_lookup_message,
-        looks_like_retryable_lookup_message, with_lookup_retries_using_delays,
+        ContenthashRecord, IPFS_CODEC, IPNS_CODEC, ResolvedContenthash, decode_contenthash,
+        OffchainLookup, decode_gateway_response_body, dns_encode_name,
+        extract_revert_data_from_message, inspect_contenthash,
+        looks_like_offline_lookup_message, looks_like_retryable_lookup_message,
+        with_lookup_retries_using_delays,
     };
     use alloy::primitives::Bytes as AlloyBytes;
     use cid::{Cid, multihash::{Code, MultihashDigest}};
@@ -975,6 +1383,44 @@ mod tests {
         assert!(!looks_like_offline_lookup_message(
             "failed to resolve ENS contenthash: execution reverted"
         ));
+    }
+
+    #[test]
+    fn dns_encodes_name() {
+        let encoded = dns_encode_name("scottrepreneur.eth").expect("dns encoding should succeed");
+        assert_eq!(
+            hex::encode(encoded.as_ref()),
+            "0e73636f747472657072656e6575720365746800"
+        );
+    }
+
+    #[test]
+    fn decodes_ccip_gateway_json_response() {
+        let response = br#"{"data":"0xe3010170122025e45327d2b33f0e65730927f8909865d94cbb9667e4d20c58e1d936afad8046"}"#;
+        let bytes = decode_gateway_response_body(response).expect("gateway json should decode");
+        assert_eq!(
+            hex::encode(bytes.as_ref()),
+            "e3010170122025e45327d2b33f0e65730927f8909865d94cbb9667e4d20c58e1d936afad8046"
+        );
+    }
+
+    #[test]
+    fn extracts_offchain_lookup_revert_from_error_message() {
+        let message = "execution reverted: 556f1830000000000000000000000000486edc2e94926fd50398e2129089648b8b9e3d3a00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000140f4d4d2f800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000026000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002f68747470733a2f2f6170692e6f7262697465722e686f73742f6c6f6f6b75702f7b73656e6465727d2f7b646174617d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e49061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000140e73636f747472657072656e65757203657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d128fee88a347f5c0b4420d61d459c0053d310d3a5c0705ef2b183c14e65fdde8b000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000040000000000000000000000000486edc2e94926fd50398e2129089648b8b9e3d3a00000000000000000000000000000000000000000000000000000000000000e49061b9230000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000140e73636f747472657072656e65757203657468000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024bc1c58d128fee88a347f5c0b4420d61d459c0053d310d3a5c0705ef2b183c14e65fdde8b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        let revert = extract_revert_data_from_message(message)
+            .expect("should recover revert data from message");
+        let lookup = OffchainLookup::abi_decode(revert.as_ref())
+            .expect("revert data should decode as OffchainLookup");
+
+        assert_eq!(
+            format!("{:#x}", lookup.sender),
+            "0x486edc2e94926fd50398e2129089648b8b9e3d3a"
+        );
+        assert_eq!(lookup.urls.len(), 1);
+        assert_eq!(
+            lookup.urls[0],
+            "https://api.orbiter.host/lookup/{sender}/{data}"
+        );
     }
 
     #[test]

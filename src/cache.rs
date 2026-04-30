@@ -2,12 +2,12 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use eyre::{Result, WrapErr};
 use reqwest::multipart;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 use url::form_urlencoded;
 
 use crate::constants::MFS_CACHE_DIR;
-use crate::ens::ResolvedContenthash;
+use crate::ens::{ContenthashResolution, ResolvedContenthash, ResolvedContenthashMetadata};
 use crate::state::AppState;
 
 const CONTENTHASH_METADATA_FILE: &str = "contenthash";
@@ -20,6 +20,7 @@ pub struct CachedDomain {
     pub full_size: u64,
     pub auto_seeding: bool,
     pub contenthash: Option<ResolvedContenthash>,
+    pub contenthash_resolution: Option<ContenthashResolution>,
     pub visit_url: String,
     pub versions: Vec<CachedVersion>,
 }
@@ -39,6 +40,13 @@ struct MfsStat {
     hash: String,
     local_size: u64,
     full_size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StoredContenthashMetadata {
+    Current(ResolvedContenthashMetadata),
+    Legacy(ResolvedContenthash),
 }
 
 pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> {
@@ -72,7 +80,13 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
             .first()
             .map(|version| version.cached_at.clone())
             .unwrap_or_default();
-        let contenthash = load_contenthash_metadata(state, &site).await;
+        let contenthash_metadata = load_contenthash_metadata(state, &site).await;
+        let contenthash = contenthash_metadata
+            .as_ref()
+            .map(|metadata| metadata.contenthash.clone());
+        let contenthash_resolution = contenthash_metadata
+            .as_ref()
+            .map(|metadata| metadata.resolution);
         let visit_url = versions
             .first()
             .map(|version| version.visit_url.clone())
@@ -85,6 +99,7 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
             full_size,
             auto_seeding,
             contenthash,
+            contenthash_resolution,
             visit_url,
             versions,
         });
@@ -212,9 +227,9 @@ pub async fn clear_cache(state: &AppState, domain: &str, version: Option<&str>) 
 pub async fn write_contenthash_metadata(
     state: &AppState,
     site: &str,
-    contenthash: &ResolvedContenthash,
+    metadata: &ResolvedContenthashMetadata,
 ) -> Result<()> {
-    let body = serde_json::to_string(contenthash).wrap_err("Failed to encode contenthash metadata")?;
+    let body = serde_json::to_string(metadata).wrap_err("Failed to encode contenthash metadata")?;
     let url = format!(
         "{}/api/v0/files/write?arg={}&create=true&truncate=true&parents=true",
         state.ipfs_api_url,
@@ -244,7 +259,7 @@ pub async fn write_contenthash_metadata(
 pub async fn read_contenthash_metadata(
     state: &AppState,
     site: &str,
-) -> Result<Option<ResolvedContenthash>> {
+) -> Result<Option<ResolvedContenthashMetadata>> {
     let url = format!(
         "{}/api/v0/files/read?arg={}",
         state.ipfs_api_url,
@@ -261,7 +276,15 @@ pub async fn read_contenthash_metadata(
     }
 
     let text = response.text().await.unwrap_or_default();
-    let contenthash = serde_json::from_str(&text).wrap_err("Failed to parse contenthash metadata")?;
+    let contenthash = match serde_json::from_str::<StoredContenthashMetadata>(&text)
+        .wrap_err("Failed to parse contenthash metadata")?
+    {
+        StoredContenthashMetadata::Current(metadata) => metadata,
+        StoredContenthashMetadata::Legacy(contenthash) => ResolvedContenthashMetadata {
+            contenthash,
+            resolution: ContenthashResolution::Onchain,
+        },
+    };
     Ok(Some(contenthash))
 }
 
@@ -405,7 +428,7 @@ fn encode_arg(value: &str) -> String {
     form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-async fn load_contenthash_metadata(state: &AppState, site: &str) -> Option<ResolvedContenthash> {
+async fn load_contenthash_metadata(state: &AppState, site: &str) -> Option<ResolvedContenthashMetadata> {
     match read_contenthash_metadata(state, site).await {
         Ok(Some(contenthash)) => Some(contenthash),
         Ok(None) | Err(_) => None,
@@ -426,4 +449,44 @@ fn timestamp_to_iso(ts: u64) -> Option<String> {
 
 fn cached_gateway_url(cid: &str) -> String {
     format!("https://{cid}.ipfs.localhost/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StoredContenthashMetadata;
+    use crate::ens::{ContenthashResolution, ResolvedContenthash, ResolvedContenthashMetadata};
+
+    #[test]
+    fn parses_legacy_contenthash_metadata() {
+        let json = r#"{"protocol":"ipfs","target":"bafy-test"}"#;
+        let parsed = serde_json::from_str::<StoredContenthashMetadata>(json)
+            .expect("legacy metadata should parse");
+
+        match parsed {
+            StoredContenthashMetadata::Legacy(contenthash) => {
+                assert_eq!(contenthash, ResolvedContenthash::Ipfs("bafy-test".to_string()));
+            }
+            StoredContenthashMetadata::Current(_) => panic!("expected legacy metadata"),
+        }
+    }
+
+    #[test]
+    fn parses_current_contenthash_metadata() {
+        let json = r#"{"contenthash":{"protocol":"ipfs","target":"bafy-test"},"resolution":"ccip-read"}"#;
+        let parsed = serde_json::from_str::<StoredContenthashMetadata>(json)
+            .expect("current metadata should parse");
+
+        match parsed {
+            StoredContenthashMetadata::Current(metadata) => {
+                assert_eq!(
+                    metadata,
+                    ResolvedContenthashMetadata {
+                        contenthash: ResolvedContenthash::Ipfs("bafy-test".to_string()),
+                        resolution: ContenthashResolution::CcipRead,
+                    }
+                );
+            }
+            StoredContenthashMetadata::Legacy(_) => panic!("expected current metadata"),
+        }
+    }
 }

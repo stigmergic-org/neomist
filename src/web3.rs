@@ -119,7 +119,7 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
         );
     }
 
-    let contract = match resolve_contract_address(state.ens_provider.as_ref(), &parsed.authority).await {
+    let contract = match resolve_contract_address(state, &parsed.authority).await {
         Ok(Some(address)) => address,
         Ok(None) => {
             let detail = format!(
@@ -218,15 +218,12 @@ async fn render_web3_content(
     ))
 }
 
-async fn resolve_contract_address(
-    provider: &DynProvider,
-    authority: &ParsedAuthority,
-) -> Result<Option<Address>> {
+async fn resolve_contract_address(state: &AppState, authority: &ParsedAuthority) -> Result<Option<Address>> {
     if let Ok(address) = Address::from_str(&authority.host) {
         return Ok(Some(address));
     }
 
-    ens::resolve_address(provider, &authority.host).await
+    ens::resolve_address(state, &authority.host).await
 }
 
 fn build_query_params(query: Option<&str>) -> Vec<KeyValue> {

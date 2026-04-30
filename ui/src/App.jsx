@@ -155,6 +155,10 @@ function isIpnsContenthash(value) {
   return value?.protocol === 'ipns' && typeof value.target === 'string' && value.target.length > 0;
 }
 
+function isCcipReadContenthashResolution(value) {
+  return value === 'ccip-read';
+}
+
 function decodeRouteSegment(value) {
   try {
     return decodeURIComponent(value);
@@ -1578,6 +1582,7 @@ function SeedingPage({
                   const latestCid = domain.versions?.[0]?.cid || '';
                   const latestProviderCount = latestCid ? providerCounts[latestCid] : null;
                   const hasIpnsContenthash = isIpnsContenthash(domain.contenthash);
+                  const hasCcipReadContenthash = isCcipReadContenthashResolution(domain.contenthash_resolution);
 
                   return (
                     <button
@@ -1601,6 +1606,13 @@ function SeedingPage({
                         </div>
 
                         <div className="flex flex-wrap items-center justify-end gap-2">
+                          {hasCcipReadContenthash ? (
+                            <StatusPill tone="warning">
+                              <WarningIcon className="mr-1 h-3.5 w-3.5" />
+                              CCIP-read
+                            </StatusPill>
+                          ) : null}
+
                           {hasIpnsContenthash ? (
                             <StatusPill tone="warning">
                               <WarningIcon className="mr-1 h-3.5 w-3.5" />
@@ -1692,6 +1704,7 @@ function DomainDetailPanel({
 
   const coverage = getCoverage(detailDomain.local_size, detailDomain.full_size);
   const hasIpnsContenthash = isIpnsContenthash(detailDomain.contenthash);
+  const hasCcipReadContenthash = isCcipReadContenthashResolution(detailDomain.contenthash_resolution);
   const isPreview = !routeDomain;
 
   return (
@@ -1701,6 +1714,12 @@ function DomainDetailPanel({
           <div className="flex items-center gap-2">
             {isPreview ? <StatusPill tone="neutral">Preview</StatusPill> : null}
             <StatusPill tone={coverage.tone}>{coverage.label}</StatusPill>
+            {hasCcipReadContenthash ? (
+              <StatusPill tone="warning">
+                <WarningIcon className="mr-1 h-3.5 w-3.5" />
+                CCIP-read
+              </StatusPill>
+            ) : null}
             {hasIpnsContenthash ? (
               <StatusPill tone="warning">
                 <WarningIcon className="mr-1 h-3.5 w-3.5" />
@@ -1732,6 +1751,20 @@ function DomainDetailPanel({
         </div>
       </div>
 
+      {hasCcipReadContenthash ? (
+        <div className="mt-4 flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+          <WarningIcon className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">CCIP-read contenthash</p>
+            <p className="mt-1 text-warning/85">
+              This ENS record resolved through offchain CCIP-read gateway instead of direct onchain <span className="font-mono">contenthash()</span> storage.
+              <br/>
+              Resolver callback still verified final answer on Ethereum, but operator can update returned contenthash offchain without another direct contenthash write. Snapshot list shows pinned results from each visit.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       {hasIpnsContenthash ? (
         <div className="mt-4 flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
           <WarningIcon className="mt-0.5 h-4 w-4 shrink-0" />
@@ -1739,7 +1772,7 @@ function DomainDetailPanel({
             <p className="font-medium">IPNS contenthash</p>
             <p className="mt-1 break-all text-warning/85">
               This ENS record resolves through IPNS name: <span className="font-mono">{detailDomain.contenthash.target}</span>.
-              <br/> 
+              <br/>
               App developer can change site content at will without another onchain transaction. Snapshot list shows pinned results from each visit.
             </p>
           </div>
