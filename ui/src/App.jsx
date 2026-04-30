@@ -54,6 +54,15 @@ function classNames(...values) {
   return values.filter(Boolean).join(' ');
 }
 
+function isMacLikePlatform() {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+
+  const platform = navigator.userAgentData?.platform || navigator.platform || navigator.userAgent || '';
+  return /Mac|iPhone|iPad|iPod/i.test(platform);
+}
+
 function checkpointBytes(hash) {
   if (typeof hash !== 'string' || hash.length === 0) {
     return null;
@@ -969,12 +978,9 @@ function HomePage({
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const inputRef = useRef(null);
   const containerRef = useRef(null);
+  const usesMetaFindShortcut = isMacLikePlatform();
 
   const { suggestions, isSearching } = useEnsSearch(value);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     setSelectedIndex(-1);
@@ -992,16 +998,23 @@ function HomePage({
 
   useEffect(() => {
     const handleKeyDown = (event) => {
-      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) {
-        return;
-      }
-
       const target = event.target;
       const isTypingTarget =
         target instanceof HTMLElement &&
         (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/i.test(target.tagName));
 
       if (isTypingTarget) {
+        return;
+      }
+
+      const isSlashShortcut = event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey;
+      const isFindShortcut =
+        event.key.toLowerCase() === 'f' &&
+        !event.altKey &&
+        !event.shiftKey &&
+        (usesMetaFindShortcut ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
+
+      if (!isSlashShortcut && !isFindShortcut) {
         return;
       }
 
@@ -1013,7 +1026,7 @@ function HomePage({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
+  }, [usesMetaFindShortcut]);
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -1075,12 +1088,32 @@ function HomePage({
                     setInputError('');
                   }
                 }}
-                className={INPUT_CLASS}
+                className={classNames(INPUT_CLASS, 'pr-32 sm:pr-44')}
                 placeholder="app.eth, app.wei, or web3://..."
                 aria-label="Dapp target"
                 autoComplete="off"
                 spellCheck="false"
               />
+
+              <div className="pointer-events-none absolute inset-y-0 right-4 flex items-center gap-1.5 text-base-content/45">
+                <kbd className="kbd kbd-sm inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium leading-none">/</kbd>
+                <kbd
+                  className={classNames(
+                    'kbd kbd-sm inline-flex h-6 items-center rounded-md px-2 text-[11px] font-medium leading-none',
+                    usesMetaFindShortcut ? 'gap-0.5' : null
+                  )}
+                >
+                  {usesMetaFindShortcut ? (
+                    <>
+                      <span className="text-[14px] leading-none">⌘</span>
+                      <span className="leading-none">+</span>
+                      <span className="leading-none">F</span>
+                    </>
+                  ) : (
+                    'Ctrl+F'
+                  )}
+                </kbd>
+              </div>
 
               {isFocused && (value.trim().length >= 3) && (suggestions.length > 0 || isSearching) && (
                 <div className={classNames(SUBTLE_PANEL_CLASS, 'absolute left-0 top-[calc(100%+8px)] z-50 w-full shadow-xl')}>
@@ -1127,9 +1160,15 @@ function HomePage({
             </button>
           </form>
 
-          <p className={classNames('mt-3 text-sm', inputError ? 'text-error' : 'text-base-content/55')}>
-            {inputError || 'Press Enter to open in a new tab. Press / at any time to focus the field.'}
-          </p>
+          {inputError ? (
+            <p className="mt-3 text-sm text-error">{inputError}</p>
+          ) : (
+            <p className="mt-3 flex items-center gap-1.5 text-sm text-base-content/55">
+              <span>Press</span>
+              <kbd className="kbd kbd-sm rounded-md px-2 text-[11px] font-medium">Enter</kbd>
+              <span>to open in new tab.</span>
+            </p>
+          )}
 
           <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-12 p-6')}>
             {recentDomains.length > 0 ? (
