@@ -10,6 +10,9 @@ export const PATHS = {
   stateDir: path.join(PACKAGE_ROOT, 'state'),
   dbPath: path.join(PACKAGE_ROOT, 'state', 'index.sqlite'),
   ipfsRootDir: path.join(PACKAGE_ROOT, 'ipfs-root'),
+  analysisWorkDir: path.join(PACKAGE_ROOT, 'state', 'analysis-work'),
+  analysisPromptPath: path.join(PACKAGE_ROOT, 'prompts', 'ipfs-app-analysis-system.md'),
+  wacPath: path.join(PACKAGE_ROOT, 'wac'),
 };
 
 export const DEFAULTS = {
@@ -20,6 +23,8 @@ export const DEFAULTS = {
   headReplayBlocks: 100,
   probeConcurrency: 5,
   timeoutMs: 20_000,
+  analysisTimeoutMs: 300_000,
+  analysisModel: process.env.APPS_NEOMIST_ANALYSIS_MODEL || 'openai/gpt-5.4-mini',
   maxBytes: 5 * 1024 * 1024,
   excludedNamespaceSuffixes: ['base.eth', 'linea.eth'],
 };

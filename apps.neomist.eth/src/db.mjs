@@ -202,6 +202,8 @@ function createStore(db) {
         failed_or_unprobed_names: getOne(db, 'SELECT COUNT(*) AS value FROM names WHERE last_probe_success = 0').value,
         name_versions: getOne(db, 'SELECT COUNT(*) AS value FROM name_versions').value,
         probes: getOne(db, 'SELECT COUNT(*) AS value FROM probes').value,
+        analyses: getOne(db, 'SELECT COUNT(*) AS value FROM analyses').value,
+        successful_analyses: getOne(db, "SELECT COUNT(*) AS value FROM analyses WHERE status = 'success'").value,
         head_cursor_block_inclusive: this.getHeadCursorBlockInclusive(),
         backfill_cursor_block_exclusive: this.getBackfillCursorBlockExclusive(),
       };
@@ -227,6 +229,7 @@ function createStore(db) {
       return {
         name: row,
         latest_probe: getOne(db, 'SELECT * FROM probes WHERE node = ? ORDER BY probed_at DESC, id DESC LIMIT 1', [row.node]),
+        latest_analysis: getOne(db, 'SELECT * FROM analyses WHERE root_cid = ? ORDER BY analyzed_at DESC, id DESC LIMIT 1', [row.root_cid]),
         versions: getAll(
           db,
           `SELECT node, name, parent_name, is_subdomain, contenthash_hex, contenthash_protocol,
@@ -253,7 +256,11 @@ function createStore(db) {
       return getAll(
         db,
         `SELECT names.node, names.name, names.parent_name, names.is_subdomain,
-                latest_probe.title, latest_probe.icon_url, latest_probe.manifest_url
+                latest_probe.title, latest_probe.icon_url, latest_probe.manifest_url,
+                latest_analysis.root_cid AS analysis_root_cid,
+                latest_analysis.model AS analysis_model,
+                latest_analysis.analyzed_at AS analysis_analyzed_at,
+                latest_analysis.analysis_json
          FROM names
          LEFT JOIN probes AS latest_probe
            ON latest_probe.id = (
@@ -263,9 +270,98 @@ function createStore(db) {
              ORDER BY probed_at DESC, id DESC
              LIMIT 1
            )
+         LEFT JOIN analyses AS latest_analysis
+           ON latest_analysis.id = (
+             SELECT id
+             FROM analyses
+             WHERE root_cid = names.root_cid
+               AND status = 'success'
+             ORDER BY analyzed_at DESC, id DESC
+             LIMIT 1
+           )
          WHERE names.last_probe_success = 1
          ORDER BY lower(names.name) ASC`,
       );
+    },
+    listNamesMissingAnalysis(limit) {
+      return getAll(
+        db,
+        `SELECT names.*, latest_probe.content_type AS probe_content_type,
+                latest_probe.title AS probe_title,
+                latest_probe.icon_url AS probe_icon_url,
+                latest_probe.manifest_url AS probe_manifest_url,
+                latest_probe.eth_link_url AS probe_content_url,
+                latest_probe.x_ipfs_path AS probe_ipfs_path
+         FROM names
+         LEFT JOIN probes AS latest_probe
+           ON latest_probe.id = (
+             SELECT id
+             FROM probes
+             WHERE node = names.node
+             ORDER BY probed_at DESC, id DESC
+             LIMIT 1
+           )
+         LEFT JOIN analyses AS existing_analysis
+           ON existing_analysis.root_cid = names.root_cid
+          AND existing_analysis.status = 'success'
+         WHERE names.last_probe_success = 1
+           AND existing_analysis.id IS NULL
+         ORDER BY lower(names.name) ASC
+         LIMIT ?`,
+        [limit],
+      );
+    },
+    upsertAnalysis(record) {
+      run(
+        db,
+        `INSERT INTO analyses (
+          node, name, root_cid, model, status, analyzed_at, duration_ms,
+          category, category_confidence, quality_tier, quality_score,
+          security_risk, security_risk_score, security_threat_type, safe_to_list, summary,
+          analysis_json, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(root_cid) DO UPDATE SET
+          node = excluded.node,
+          name = excluded.name,
+          model = excluded.model,
+          status = excluded.status,
+          analyzed_at = excluded.analyzed_at,
+          duration_ms = excluded.duration_ms,
+          category = excluded.category,
+          category_confidence = excluded.category_confidence,
+          quality_tier = excluded.quality_tier,
+          quality_score = excluded.quality_score,
+           security_risk = excluded.security_risk,
+           security_risk_score = excluded.security_risk_score,
+           security_threat_type = excluded.security_threat_type,
+           safe_to_list = excluded.safe_to_list,
+           summary = excluded.summary,
+           analysis_json = excluded.analysis_json,
+           error = excluded.error
+         WHERE analyses.status != 'success'
+            OR excluded.status = 'success'`,
+        [
+          record.node,
+          record.name,
+          record.root_cid,
+          record.model,
+          record.status,
+          record.analyzed_at,
+          record.duration_ms,
+          record.category,
+          record.category_confidence,
+          record.quality_tier,
+          record.quality_score,
+          record.security_risk,
+          record.security_risk_score,
+          record.security_threat_type,
+          record.safe_to_list,
+          record.summary,
+          record.analysis_json,
+          record.error,
+        ],
+      );
+      dirty = true;
     },
     listContenthashVersionsForNodes(nodes) {
       if (nodes.length === 0) {
@@ -288,6 +384,7 @@ function ensureSchemaMigrations(db) {
   ensureColumn(db, 'names', 'source_tx_hash', 'TEXT');
   ensureColumn(db, 'names', 'source_event_id', 'TEXT');
   ensureColumn(db, 'probes', 'manifest_url', 'TEXT');
+  ensureColumn(db, 'analyses', 'security_threat_type', 'TEXT');
 }
 
 function ensureColumn(db, tableName, columnName, columnType) {

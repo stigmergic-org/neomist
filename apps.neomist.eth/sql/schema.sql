@@ -69,3 +69,30 @@ CREATE TABLE IF NOT EXISTS probes (
 
 CREATE INDEX IF NOT EXISTS idx_probes_node ON probes(node, probed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_probes_success ON probes(success, probed_at DESC);
+
+CREATE TABLE IF NOT EXISTS analyses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node TEXT NOT NULL,
+  name TEXT NOT NULL,
+  root_cid TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  analyzed_at TEXT NOT NULL,
+  duration_ms INTEGER,
+  category TEXT,
+  category_confidence REAL,
+  quality_tier TEXT,
+  quality_score REAL,
+  security_risk TEXT,
+  security_risk_score REAL,
+  security_threat_type TEXT,
+  safe_to_list INTEGER,
+  summary TEXT,
+  analysis_json TEXT,
+  error TEXT,
+  UNIQUE(root_cid),
+  FOREIGN KEY(node) REFERENCES names(node)
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyses_status ON analyses(status, analyzed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analyses_root_cid ON analyses(root_cid);

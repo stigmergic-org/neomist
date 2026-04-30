@@ -1,10 +1,11 @@
 import process from 'node:process';
+import { analyzeMissingNames, analyzeName } from './analyze.mjs';
 import { DEFAULTS } from './config.mjs';
 import { openStore } from './db.mjs';
 import { exportIpfsTree } from './export-ipfs-tree.mjs';
 import { syncName, syncNames } from './sync-names.mjs';
 
-const BOOLEAN_FLAGS = new Set(['details', 'full-backfill', 'skip-probe']);
+const BOOLEAN_FLAGS = new Set(['details', 'force', 'full-backfill', 'skip-probe']);
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
@@ -36,6 +37,12 @@ async function main() {
         break;
       case 'sync-name':
         await runSyncName(store, args);
+        break;
+      case 'analyze-name':
+        await runAnalyzeName(store, args);
+        break;
+      case 'analyze-names':
+        await runAnalyzeNames(store, parseFlags(args));
         break;
       case 'export-ipfs':
         await runExportIpfs(store);
@@ -86,6 +93,33 @@ async function runSyncName(store, args) {
     timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.timeoutMs),
     maxBytes: parseIntegerFlag(flags['max-bytes'], DEFAULTS.maxBytes),
     skipProbe: Boolean(flags['skip-probe']),
+  });
+  printJson(summary);
+}
+
+async function runAnalyzeName(store, args) {
+  const flags = parseFlags(args);
+  const [identifier] = positionalArgs(args);
+  if (!identifier) {
+    throw new Error('analyze-name requires name or node argument');
+  }
+
+  const summary = await analyzeName(store, identifier, {
+    identifier,
+    cid: flags.cid,
+    model: flags.model ?? DEFAULTS.analysisModel,
+    timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.analysisTimeoutMs),
+    force: Boolean(flags.force),
+  });
+  printJson(summary);
+}
+
+async function runAnalyzeNames(store, flags) {
+  const summary = await analyzeMissingNames(store, {
+    limit: parseIntegerFlag(flags.limit, 10),
+    model: flags.model ?? DEFAULTS.analysisModel,
+    timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.analysisTimeoutMs),
+    force: Boolean(flags.force),
   });
   printJson(summary);
 }
@@ -220,6 +254,12 @@ function printCommandHelp(command) {
     case 'sync-name':
       printSyncNameHelp();
       return;
+    case 'analyze-name':
+      printAnalyzeNameHelp();
+      return;
+    case 'analyze-names':
+      printAnalyzeNamesHelp();
+      return;
     case 'export-ipfs':
       printExportIpfsHelp();
       return;
@@ -245,12 +285,37 @@ function printGeneralHelp() {
   process.stdout.write(`Commands:\n`);
   process.stdout.write(`  sync-names            head sync recent ENSNode events, then backfill older ones, store current names, probe via Kubo RPC\n`);
   process.stdout.write(`  sync-name             sync one ENS name or node, then probe via Kubo RPC\n`);
+  process.stdout.write(`  analyze-name          analyze one synced name through WAC/OpenCode\n`);
+  process.stdout.write(`  analyze-names         analyze synced names missing CID analysis\n`);
   process.stdout.write(`  export-ipfs           export successful current names into ipfs-root\n`);
   process.stdout.write(`  db-stats              print SQLite stats\n`);
   process.stdout.write(`  list-names            print stored names (default limit 50)\n`);
   process.stdout.write(`  show-name             print one name or node plus latest probe\n`);
   process.stdout.write(`  list-probe-failures   print latest failed probes (default limit 50)\n\n`);
   process.stdout.write(`Run \`<command> -h\` for command-specific help.\n`);
+}
+
+function printAnalyzeNameHelp() {
+  process.stdout.write(`Usage: node src/cli.mjs analyze-name <name|node> [options]\n\n`);
+  process.stdout.write(`Analyze one synced name via WAC/OpenCode and store result in SQLite.\n\n`);
+  process.stdout.write(`Arguments:\n`);
+  process.stdout.write(`  <name|node>               ENS name like vitalik.eth or node like 0x...\n\n`);
+  process.stdout.write(`Options:\n`);
+  process.stdout.write(`  --cid CID                 analyze this CID instead of the current name root CID\n`);
+  process.stdout.write(`  --model MODEL             opencode model (default ${DEFAULTS.analysisModel})\n`);
+  process.stdout.write(`  --timeout-ms N            analysis timeout (default ${DEFAULTS.analysisTimeoutMs})\n`);
+  process.stdout.write(`  --force                   re-run even if successful analysis exists\n`);
+  process.stdout.write(`  -h, --help                show this help\n`);
+}
+
+function printAnalyzeNamesHelp() {
+  process.stdout.write(`Usage: node src/cli.mjs analyze-names [options]\n\n`);
+  process.stdout.write(`Analyze synced successful names whose current CID has no successful analysis.\n\n`);
+  process.stdout.write(`Options:\n`);
+  process.stdout.write(`  --limit N                 max names to analyze (default 10)\n`);
+  process.stdout.write(`  --model MODEL             opencode model (default ${DEFAULTS.analysisModel})\n`);
+  process.stdout.write(`  --timeout-ms N            per-name analysis timeout (default ${DEFAULTS.analysisTimeoutMs})\n`);
+  process.stdout.write(`  -h, --help                show this help\n`);
 }
 
 function printSyncNameHelp() {
