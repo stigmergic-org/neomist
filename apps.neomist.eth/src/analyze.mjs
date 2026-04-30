@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { copyFile, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DEFAULTS, PATHS } from './config.mjs';
+import { hasHashedLabel } from './filters.mjs';
 
 const CATEGORY_LABELS = new Set([
   'Finance',
@@ -33,6 +34,7 @@ const CATEGORY_LABELS = new Set([
 
 const QUALITY_TIERS = new Set(['excellent', 'good', 'fair', 'low', 'broken', 'unknown']);
 const SECURITY_RISKS = new Set(['low', 'medium', 'high', 'critical', 'unknown']);
+const PROCESS_OUTPUT_LIMIT = 16_384;
 const SECURITY_THREAT_TYPES = new Set([
   'none',
   'seed_phrase_prompt',
@@ -57,6 +59,17 @@ export async function analyzeName(store, identifier, options = {}) {
       found: false,
       analyzed: false,
       status: 'not_found',
+    };
+  }
+  if (hasHashedLabel(shown.name.name)) {
+    return {
+      identifier,
+      found: true,
+      analyzed: false,
+      status: 'skipped_hashed_label',
+      name: shown.name.name,
+      node: shown.name.node,
+      root_cid: options.cid ?? shown.name.root_cid,
     };
   }
 
@@ -89,6 +102,7 @@ export async function analyzeMissingNames(store, options = {}) {
 async function analyzeTarget(store, target, options) {
   const model = options.model ?? DEFAULTS.analysisModel;
   const timeoutMs = options.timeoutMs ?? DEFAULTS.analysisTimeoutMs;
+  const memoryLimit = options.memoryLimit ?? DEFAULTS.analysisMemoryLimit;
   const startedAt = Date.now();
   const analyzedAt = new Date().toISOString();
 
@@ -112,7 +126,7 @@ async function analyzeTarget(store, target, options) {
 
   try {
     const workDir = await prepareWorkDir(target);
-    const run = await runWacAnalysis({ workDir, model, timeoutMs });
+    const run = await runWacAnalysis({ workDir, model, timeoutMs, memoryLimit });
     stdout = run.stdout;
     stderr = run.stderr;
 
@@ -121,7 +135,8 @@ async function analyzeTarget(store, target, options) {
       error = `analysis timed out after ${timeoutMs}ms`;
     } else if (run.exitCode !== 0) {
       status = 'failed';
-      error = `wac opencode exited with status ${run.exitCode}`;
+      const output = summarizeProcessOutput(stdout, stderr);
+      error = output ? `wac opencode exited with status ${run.exitCode}\n${output}` : `wac opencode exited with status ${run.exitCode}`;
     } else {
       try {
         analysis = await readAnalysisJson(workDir);
@@ -264,11 +279,13 @@ function buildMetadata(target, mountedRootPath) {
   };
 }
 
-async function runWacAnalysis({ workDir, model, timeoutMs }) {
+async function runWacAnalysis({ workDir, model, timeoutMs, memoryLimit }) {
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   const args = [
     '--allow-root',
     '--mount-ipfs',
+    '--memory-limit',
+    memoryLimit,
     '-n',
     'timeout',
     '--kill-after=10s',
@@ -294,10 +311,10 @@ function spawnProcess(command, args, options) {
     let stderr = '';
 
     child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
+      stdout = appendLimitedOutput(stdout, chunk);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
+      stderr = appendLimitedOutput(stderr, chunk);
     });
     child.on('error', (error) => {
       resolve({ exitCode: 1, timedOut: false, stdout, stderr: `${stderr}${error.message}` });
@@ -306,6 +323,11 @@ function spawnProcess(command, args, options) {
       resolve({ exitCode, timedOut: exitCode === 124, stdout, stderr });
     });
   });
+}
+
+function appendLimitedOutput(existing, chunk) {
+  const value = `${existing}${chunk.toString()}`;
+  return value.length > PROCESS_OUTPUT_LIMIT ? value.slice(-PROCESS_OUTPUT_LIMIT) : value;
 }
 
 async function readAnalysisJson(workDir) {

@@ -108,6 +108,7 @@ async function runAnalyzeName(store, args) {
     identifier,
     cid: flags.cid,
     model: flags.model ?? DEFAULTS.analysisModel,
+    memoryLimit: flags['memory-limit'] ?? DEFAULTS.analysisMemoryLimit,
     timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.analysisTimeoutMs),
     force: Boolean(flags.force),
   });
@@ -118,6 +119,7 @@ async function runAnalyzeNames(store, flags) {
   const summary = await analyzeMissingNames(store, {
     limit: parseIntegerFlag(flags.limit, 10),
     model: flags.model ?? DEFAULTS.analysisModel,
+    memoryLimit: flags['memory-limit'] ?? DEFAULTS.analysisMemoryLimit,
     timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.analysisTimeoutMs),
     force: Boolean(flags.force),
     retryFailed: Boolean(flags['retry-failed']),
@@ -305,6 +307,7 @@ function printAnalyzeNameHelp() {
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --cid CID                 analyze this CID instead of the current name root CID\n`);
   process.stdout.write(`  --model MODEL             opencode model (default ${DEFAULTS.analysisModel})\n`);
+  process.stdout.write(`  --memory-limit N          WAC container memory limit (default ${DEFAULTS.analysisMemoryLimit})\n`);
   process.stdout.write(`  --timeout-ms N            analysis timeout (default ${DEFAULTS.analysisTimeoutMs})\n`);
   process.stdout.write(`  --force                   re-run even if successful analysis exists\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
@@ -316,6 +319,7 @@ function printAnalyzeNamesHelp() {
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --limit N                 max names to analyze (default 10)\n`);
   process.stdout.write(`  --model MODEL             opencode model (default ${DEFAULTS.analysisModel})\n`);
+  process.stdout.write(`  --memory-limit N          WAC container memory limit (default ${DEFAULTS.analysisMemoryLimit})\n`);
   process.stdout.write(`  --timeout-ms N            per-name analysis timeout (default ${DEFAULTS.analysisTimeoutMs})\n`);
   process.stdout.write(`  --retry-failed            include CIDs with failed, timeout, or invalid prior analysis\n`);
   process.stdout.write(`  -h, --help                show this help\n`);

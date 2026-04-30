@@ -303,6 +303,7 @@ function createStore(db) {
              LIMIT 1
            )
          WHERE names.last_probe_success = 1
+           AND names.name NOT LIKE '[%].%'
            AND NOT EXISTS (
              SELECT 1
              FROM analyses
@@ -315,6 +316,13 @@ function createStore(db) {
                SELECT 1
                FROM analyses
                WHERE root_cid = names.root_cid
+             )
+             OR EXISTS (
+               SELECT 1
+               FROM analyses
+               WHERE root_cid = names.root_cid
+                 AND status = 'failed'
+                 AND error LIKE 'wac opencode exited with status 1%'
              )
            )
          ORDER BY lower(names.name) ASC

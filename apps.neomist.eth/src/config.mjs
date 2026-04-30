@@ -25,6 +25,7 @@ export const DEFAULTS = {
   timeoutMs: 20_000,
   analysisTimeoutMs: 300_000,
   analysisModel: process.env.APPS_NEOMIST_ANALYSIS_MODEL || 'openai/gpt-5.4-mini',
+  analysisMemoryLimit: process.env.APPS_NEOMIST_ANALYSIS_MEMORY_LIMIT || '1g',
   maxBytes: 5 * 1024 * 1024,
   excludedNamespaceSuffixes: ['base.eth', 'linea.eth'],
 };

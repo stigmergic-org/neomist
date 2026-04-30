@@ -24,6 +24,10 @@ export function isSubdomain(name) {
   return String(name).split('.').length > 2;
 }
 
+export function hasHashedLabel(name) {
+  return String(name).split('.').some((label) => /^\[[0-9a-f]{64}\]$/i.test(label));
+}
+
 export function parentName(name) {
   const parts = String(name).split('.');
   if (parts.length <= 1) {
