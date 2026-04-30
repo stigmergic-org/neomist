@@ -65,17 +65,22 @@ export async function analyzeName(store, identifier, options = {}) {
 
 export async function analyzeMissingNames(store, options = {}) {
   const limit = options.limit ?? 10;
-  const rows = store.listNamesMissingAnalysis(limit);
+  const logger = options.logger;
+  const retryFailed = Boolean(options.retryFailed);
+  const rows = store.listNamesMissingAnalysis(limit, { retryFailed });
   const results = [];
 
   for (const row of rows) {
+    logger?.(`analyzing ${row.name} ${row.root_cid}`);
     const result = await analyzeTarget(store, buildTargetFromListRow(row), options);
     results.push(result);
+    logger?.(`analyzed ${row.name} ${result.status}${result.category ? ` ${result.category}` : ''} ${result.duration_ms ?? 0}ms`);
     await store.flush?.();
   }
 
   return {
     requestedLimit: limit,
+    retryFailed,
     analyzed: results.length,
     results,
   };

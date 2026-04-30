@@ -5,7 +5,7 @@ import { openStore } from './db.mjs';
 import { exportIpfsTree } from './export-ipfs-tree.mjs';
 import { syncName, syncNames } from './sync-names.mjs';
 
-const BOOLEAN_FLAGS = new Set(['details', 'force', 'full-backfill', 'skip-probe']);
+const BOOLEAN_FLAGS = new Set(['details', 'force', 'full-backfill', 'retry-failed', 'skip-probe']);
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
@@ -120,6 +120,8 @@ async function runAnalyzeNames(store, flags) {
     model: flags.model ?? DEFAULTS.analysisModel,
     timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.analysisTimeoutMs),
     force: Boolean(flags.force),
+    retryFailed: Boolean(flags['retry-failed']),
+    logger: logInfo,
   });
   printJson(summary);
 }
@@ -286,7 +288,7 @@ function printGeneralHelp() {
   process.stdout.write(`  sync-names            head sync recent ENSNode events, then backfill older ones, store current names, probe via Kubo RPC\n`);
   process.stdout.write(`  sync-name             sync one ENS name or node, then probe via Kubo RPC\n`);
   process.stdout.write(`  analyze-name          analyze one synced name through WAC/OpenCode\n`);
-  process.stdout.write(`  analyze-names         analyze synced names missing CID analysis\n`);
+  process.stdout.write(`  analyze-names         analyze synced names with unattempted current CID\n`);
   process.stdout.write(`  export-ipfs           export successful current names into ipfs-root\n`);
   process.stdout.write(`  db-stats              print SQLite stats\n`);
   process.stdout.write(`  list-names            print stored names (default limit 50)\n`);
@@ -310,11 +312,12 @@ function printAnalyzeNameHelp() {
 
 function printAnalyzeNamesHelp() {
   process.stdout.write(`Usage: node src/cli.mjs analyze-names [options]\n\n`);
-  process.stdout.write(`Analyze synced successful names whose current CID has no successful analysis.\n\n`);
+  process.stdout.write(`Analyze synced successful names whose current CID has not been attempted.\n\n`);
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --limit N                 max names to analyze (default 10)\n`);
   process.stdout.write(`  --model MODEL             opencode model (default ${DEFAULTS.analysisModel})\n`);
   process.stdout.write(`  --timeout-ms N            per-name analysis timeout (default ${DEFAULTS.analysisTimeoutMs})\n`);
+  process.stdout.write(`  --retry-failed            include CIDs with failed, timeout, or invalid prior analysis\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
 }
 

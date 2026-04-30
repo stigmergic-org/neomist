@@ -64,11 +64,13 @@ export async function syncNames(store, options = {}) {
     timeoutMs,
     maxBytes,
     onlyUnknownNodes: false,
+    startBlockInclusive: headStartInclusive,
+    latestBlockInclusive: latestHeadBlock,
   });
 
   logInfo(
     logger,
-    `Head sync done: events=${headSummary.scannedEvents} blocks=${headSummary.scannedBlocks} names=${headSummary.currentNames} upserted=${headSummary.upserted} probed=${headSummary.probed}`,
+    `Head sync done: events=${headSummary.scannedEvents} event_blocks=${headSummary.eventBlocks} range_blocks=${headSummary.rangeBlocks} names=${headSummary.currentNames} upserted=${headSummary.upserted} probed=${headSummary.probed}`,
   );
 
   store.setHeadCursorBlockInclusive(latestHeadBlock);
@@ -97,7 +99,7 @@ export async function syncNames(store, options = {}) {
 
   logInfo(
     logger,
-    `Backfill sync done: names=${backfillSummary.processedCurrentNames} events=${backfillSummary.scannedEvents} blocks=${backfillSummary.scannedBlocks} next_cursor=${backfillSummary.cursorBlockExclusive}`,
+    `Backfill sync done: names=${backfillSummary.processedCurrentNames} events=${backfillSummary.scannedEvents} boundary_batches=${backfillSummary.boundaryBatches} next_cursor=${backfillSummary.cursorBlockExclusive}`,
   );
 
   return {
@@ -244,6 +246,7 @@ async function runBackfillSync({
     processedCurrentNames,
     scannedEvents,
     scannedBlocks,
+    boundaryBatches: scannedBlocks,
     cursorBlockExclusive: currentCursor,
   };
 }
@@ -257,6 +260,8 @@ async function processEventSet({
   timeoutMs,
   maxBytes,
   onlyUnknownNodes,
+  startBlockInclusive = null,
+  latestBlockInclusive = null,
 }) {
   const latestEventByNode = buildLatestEventByNode(events);
   const candidateNodes = [...latestEventByNode.keys()];
@@ -276,9 +281,16 @@ async function processEventSet({
     maxBytes,
   });
 
+  const eventBlocks = countDistinctBlocks(events);
+  const rangeBlocks = Number.isInteger(startBlockInclusive) && Number.isInteger(latestBlockInclusive)
+    ? Math.max(0, latestBlockInclusive - startBlockInclusive + 1)
+    : eventBlocks;
+
   return {
     scannedEvents: events.length,
-    scannedBlocks: countDistinctBlocks(events),
+    scannedBlocks: eventBlocks,
+    eventBlocks,
+    rangeBlocks,
     ...applySummary,
   };
 }
@@ -445,6 +457,9 @@ function emptySyncSummary() {
   return {
     scannedEvents: 0,
     scannedBlocks: 0,
+    eventBlocks: 0,
+    rangeBlocks: 0,
+    boundaryBatches: 0,
     currentNames: 0,
     upserted: 0,
     probed: 0,

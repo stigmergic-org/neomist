@@ -283,7 +283,8 @@ function createStore(db) {
          ORDER BY lower(names.name) ASC`,
       );
     },
-    listNamesMissingAnalysis(limit) {
+    listNamesMissingAnalysis(limit, options = {}) {
+      const retryFailed = options.retryFailed ? 1 : 0;
       return getAll(
         db,
         `SELECT names.*, latest_probe.content_type AS probe_content_type,
@@ -301,14 +302,24 @@ function createStore(db) {
              ORDER BY probed_at DESC, id DESC
              LIMIT 1
            )
-         LEFT JOIN analyses AS existing_analysis
-           ON existing_analysis.root_cid = names.root_cid
-          AND existing_analysis.status = 'success'
          WHERE names.last_probe_success = 1
-           AND existing_analysis.id IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM analyses
+             WHERE root_cid = names.root_cid
+               AND status = 'success'
+           )
+           AND (
+             ? = 1
+             OR NOT EXISTS (
+               SELECT 1
+               FROM analyses
+               WHERE root_cid = names.root_cid
+             )
+           )
          ORDER BY lower(names.name) ASC
          LIMIT ?`,
-        [limit],
+        [retryFailed, limit],
       );
     },
     upsertAnalysis(record) {
