@@ -48,7 +48,7 @@ async function main() {
         await runExportIpfs(store);
         break;
       case 'db-stats':
-        printJson(store.getStats());
+        runDbStats(store, parseFlags(args));
         break;
       case 'list-names':
         runListNames(store, parseFlags(args));
@@ -131,6 +131,12 @@ async function runAnalyzeNames(store, flags) {
 async function runExportIpfs(store) {
   const summary = await exportIpfsTree(store);
   printJson(summary);
+}
+
+function runDbStats(store, flags) {
+  printJson(store.getStats({
+    category: parseOptionalStringFlag(flags.category, 'category'),
+  }));
 }
 
 function runListNames(store, flags) {
@@ -221,6 +227,16 @@ function parseIntegerFlag(value, fallback) {
     throw new Error(`invalid integer flag value: ${value}`);
   }
   return parsed;
+}
+
+function parseOptionalStringFlag(value, label) {
+  if (value == null) {
+    return undefined;
+  }
+  if (value === true || String(value).trim() === '') {
+    throw new Error(`--${label} requires value`);
+  }
+  return String(value);
 }
 
 function printJson(value) {
@@ -362,9 +378,10 @@ function printExportIpfsHelp() {
 }
 
 function printDbStatsHelp() {
-  process.stdout.write(`Usage: node src/cli.mjs db-stats\n\n`);
-  process.stdout.write(`Print SQLite stats and sync cursors.\n\n`);
+  process.stdout.write(`Usage: node src/cli.mjs db-stats [options]\n\n`);
+  process.stdout.write(`Print SQLite stats, sync cursors, and app analysis breakdowns.\n\n`);
   process.stdout.write(`Options:\n`);
+  process.stdout.write(`  --category CATEGORY       filter app breakdowns to one analysis category (case-insensitive)\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
 }
 
