@@ -52,7 +52,7 @@ pub async fn run_following_loop(state: AppState, mut synced_rx: Receiver<()>) {
                         );
                     }
 
-                    match ens::update_mfs_cache(&state, &domain.domain, &metadata.contenthash).await {
+                    match ens::update_mfs_cache(&state, &domain.domain, &metadata.contenthash, false).await {
                         Ok(true) => {
                             info!(
                                 "Following: updating {} to {}",

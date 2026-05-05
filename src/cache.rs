@@ -11,11 +11,13 @@ use crate::ens::{ContenthashResolution, ResolvedContenthash, ResolvedContenthash
 use crate::state::AppState;
 
 const CONTENTHASH_METADATA_FILE: &str = "contenthash";
+const SNAPSHOT_ACCESS_METADATA_DIR: &str = "snapshot-access";
 
 #[derive(Debug, Serialize)]
 pub struct CachedDomain {
     pub domain: String,
     pub cached_at: String,
+    pub last_accessed_at: String,
     pub local_size: u64,
     pub full_size: u64,
     pub auto_seeding: bool,
@@ -30,6 +32,7 @@ pub struct CachedVersion {
     pub timestamp: u64,
     pub cid: String,
     pub cached_at: String,
+    pub last_accessed_at: String,
     pub local_size: u64,
     pub full_size: u64,
     pub visit_url: String,
@@ -47,6 +50,11 @@ struct MfsStat {
 enum StoredContenthashMetadata {
     Current(ResolvedContenthashMetadata),
     Legacy(ResolvedContenthash),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotAccessMetadata {
+    last_accessed_at: String,
 }
 
 pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> {
@@ -80,6 +88,14 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
             .first()
             .map(|version| version.cached_at.clone())
             .unwrap_or_default();
+        let last_accessed_at = versions
+            .iter()
+            .filter_map(|version| {
+                (!version.last_accessed_at.is_empty()).then_some(version.last_accessed_at.as_str())
+            })
+            .max()
+            .unwrap_or_default()
+            .to_string();
         let contenthash_metadata = load_contenthash_metadata(state, &site).await;
         let contenthash = contenthash_metadata
             .as_ref()
@@ -95,6 +111,7 @@ pub async fn list_cached_domains(state: &AppState) -> Result<Vec<CachedDomain>> 
         results.push(CachedDomain {
             domain: site,
             cached_at,
+            last_accessed_at,
             local_size,
             full_size,
             auto_seeding,
@@ -256,6 +273,42 @@ pub async fn write_contenthash_metadata(
     Ok(())
 }
 
+pub async fn touch_snapshot_access(
+    state: &AppState,
+    site: &str,
+    snapshot: &str,
+) -> Result<String> {
+    let last_accessed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let body = serde_json::to_string(&SnapshotAccessMetadata {
+        last_accessed_at: last_accessed_at.clone(),
+    })
+    .wrap_err("Failed to encode snapshot access metadata")?;
+    let url = format!(
+        "{}/api/v0/files/write?arg={}&create=true&truncate=true&parents=true",
+        state.ipfs_api_url,
+        encode_arg(&snapshot_access_metadata_path(site, snapshot))
+    );
+    let form = multipart::Form::new().part("data", multipart::Part::text(body));
+    let response = state
+        .http_client
+        .post(url)
+        .multipart(form)
+        .send()
+        .await
+        .wrap_err("Failed to write snapshot access metadata")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(eyre::eyre!(
+            "Failed to write snapshot access metadata (status {}): {}",
+            status,
+            body
+        ));
+    }
+
+    Ok(last_accessed_at)
+}
+
 pub async fn read_contenthash_metadata(
     state: &AppState,
     site: &str,
@@ -312,11 +365,21 @@ async fn list_site_versions(state: &AppState, site: &str) -> Result<Vec<CachedVe
             }
         };
         let visit_url = cached_gateway_url(&stat.hash);
+        let cached_at = timestamp_to_iso(ts).unwrap_or_default();
+        let last_accessed_at = match read_snapshot_access_metadata(state, site, &entry).await {
+            Ok(Some(metadata)) => metadata.last_accessed_at,
+            Ok(None) => String::new(),
+            Err(err) => {
+                warn!("Failed to read snapshot access metadata for {site}/{entry}: {err}");
+                String::new()
+            }
+        };
 
         versions.push(CachedVersion {
             timestamp: ts,
             cid: stat.hash,
-            cached_at: timestamp_to_iso(ts).unwrap_or_default(),
+            cached_at,
+            last_accessed_at,
             local_size: stat.local_size,
             full_size: stat.full_size,
             visit_url,
@@ -435,9 +498,43 @@ async fn load_contenthash_metadata(state: &AppState, site: &str) -> Option<Resol
     }
 }
 
+async fn read_snapshot_access_metadata(
+    state: &AppState,
+    site: &str,
+    snapshot: &str,
+) -> Result<Option<SnapshotAccessMetadata>> {
+    let url = format!(
+        "{}/api/v0/files/read?arg={}",
+        state.ipfs_api_url,
+        encode_arg(&snapshot_access_metadata_path(site, snapshot))
+    );
+    let response = state.http_client.post(url).send().await;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let text = response.text().await.unwrap_or_default();
+    Ok(Some(
+        serde_json::from_str::<SnapshotAccessMetadata>(&text)
+            .wrap_err("Failed to parse snapshot access metadata")?,
+    ))
+}
+
 fn contenthash_metadata_path(site: &str) -> String {
     let safe_site = site.replace('/', "_");
     format!("{MFS_CACHE_DIR}/{safe_site}/{CONTENTHASH_METADATA_FILE}")
+}
+
+fn snapshot_access_metadata_path(site: &str, snapshot: &str) -> String {
+    let safe_site = site.replace('/', "_");
+    format!(
+        "{MFS_CACHE_DIR}/{safe_site}/{SNAPSHOT_ACCESS_METADATA_DIR}/{snapshot}.json"
+    )
 }
 
 fn timestamp_to_iso(ts: u64) -> Option<String> {

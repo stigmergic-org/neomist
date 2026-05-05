@@ -150,6 +150,10 @@ function formatTimestamp(value) {
   }).format(date);
 }
 
+function formatLastAccessLabel(value) {
+  return value ? `Last accessed ${formatTimestamp(value)}` : 'Not opened yet';
+}
+
 function shortCid(value) {
   if (typeof value !== 'string') {
     return '';
@@ -1442,9 +1446,14 @@ function SeedingPage({
         return true;
       })
       .sort((left, right) => {
-        const timeCompare = (right.cached_at || '').localeCompare(left.cached_at || '');
+        const timeCompare = (right.last_accessed_at || '').localeCompare(left.last_accessed_at || '');
         if (timeCompare !== 0) {
           return timeCompare;
+        }
+
+        const cachedCompare = (right.cached_at || '').localeCompare(left.cached_at || '');
+        if (cachedCompare !== 0) {
+          return cachedCompare;
         }
 
         return left.domain.localeCompare(right.domain);
@@ -1639,9 +1648,7 @@ function SeedingPage({
                       <div className="flex items-start justify-between gap-4">
                         <div>
                           <p className="text-sm font-medium">{domain.domain}</p>
-                          <p className="mt-1 text-xs text-base-content/55">
-                            {formatTimestamp(domain.cached_at)}
-                          </p>
+                          <p className="mt-1 text-xs text-base-content/55">{formatLastAccessLabel(domain.last_accessed_at)}</p>
                         </div>
 
                         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -1829,9 +1836,10 @@ function DomainDetailPanel({
         </div>
       </div>
 
-      <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <MetricTile label="Snapshots" value={detailDomain.versions?.length || 0} />
         <MetricTile label="Last cached" value={formatTimestamp(detailDomain.cached_at)} />
+        <MetricTile label="Last accessed" value={formatTimestamp(detailDomain.last_accessed_at)} />
         <MetricTile label="Stored" value={formatBytes(detailDomain.local_size)} />
         <MetricTile label="Content size" value={formatBytes(detailDomain.full_size)} />
       </div>
@@ -1886,6 +1894,11 @@ function DomainDetailPanel({
                       <h4 className="mt-4 text-lg font-semibold tracking-tight">
                         {formatTimestamp(version.cached_at)}
                       </h4>
+                      {version.last_accessed_at && version.last_accessed_at !== version.cached_at ? (
+                        <p className="mt-2 text-xs text-base-content/55">
+                          Last accessed {formatTimestamp(version.last_accessed_at)}
+                        </p>
+                      ) : null}
                       <p className="mt-2 font-mono text-xs text-base-content/60 break-all">{version.cid}</p>
                     </div>
 

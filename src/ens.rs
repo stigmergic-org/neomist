@@ -6,6 +6,7 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolError};
 use axum::body::Body;
+use axum::http::Method;
 use axum::http::{Request, Response, StatusCode, header::HOST};
 use eyre::{Report, Result, WrapErr};
 use serde::{Deserialize, Serialize};
@@ -185,6 +186,7 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
     let path = parts.uri.path();
     let query = parts.uri.query();
     let wants_html_error_page = site_error::prefers_html_error_page(&parts.headers);
+    let should_track_access = should_track_access(&parts);
 
     let (contenthash, contenthash_metadata, refresh_cache) =
         match resolve_contenthash_record(state, ens_name).await {
@@ -297,8 +299,12 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
         warn!("Contenthash metadata update failed for {ens_name}: {err}");
     }
 
-    if refresh_cache && let Err(err) = update_mfs_cache(state, ens_name, &contenthash).await {
-        warn!("MFS cache update failed for {ens_name}: {err}");
+    if refresh_cache {
+        if let Err(err) = update_mfs_cache(state, ens_name, &contenthash, should_track_access).await {
+            warn!("MFS cache update failed for {ens_name}: {err}");
+        }
+    } else if should_track_access && let Err(err) = touch_latest_cached_snapshot(state, ens_name).await {
+        warn!("Snapshot access update failed for {ens_name}: {err}");
     }
 
     let mut url = contenthash.gateway_url(state.ipfs_gateway_port, path);
@@ -443,13 +449,17 @@ pub async fn update_mfs_cache(
     state: &AppState,
     site: &str,
     contenthash: &ResolvedContenthash,
+    should_track_access: bool,
 ) -> Result<bool> {
     let base_path = cache_base_path(site);
     let resolved_cid = snapshot_cid(state, contenthash).await?;
 
     let latest = latest_mfs_entry(state, &base_path).await?;
-    if let Some((_timestamp, existing_cid)) = &latest {
+    if let Some((timestamp, existing_cid)) = &latest {
         if existing_cid == &resolved_cid {
+            if should_track_access {
+                crate::cache::touch_snapshot_access(state, site, timestamp).await?;
+            }
             return Ok(false);
         }
     }
@@ -486,7 +496,19 @@ pub async fn update_mfs_cache(
         ));
     }
 
+    if should_track_access {
+        crate::cache::touch_snapshot_access(state, site, &ts.to_string()).await?;
+    }
+
     Ok(true)
+}
+
+async fn touch_latest_cached_snapshot(state: &AppState, site: &str) -> Result<()> {
+    let Some((timestamp, _cid)) = latest_mfs_entry(state, &cache_base_path(site)).await? else {
+        return Ok(());
+    };
+    crate::cache::touch_snapshot_access(state, site, &timestamp).await?;
+    Ok(())
 }
 
 async fn snapshot_ipfs_path(state: &AppState, contenthash: &ResolvedContenthash) -> Result<String> {
@@ -642,6 +664,22 @@ fn encode_arg(value: &str) -> String {
 fn cache_base_path(site: &str) -> String {
     let safe_site = site.replace('/', "_");
     format!("{MFS_CACHE_DIR}/{safe_site}")
+}
+
+fn should_track_access(parts: &axum::http::request::Parts) -> bool {
+    if parts.method != Method::GET && parts.method != Method::HEAD {
+        return false;
+    }
+
+    match parts
+        .headers
+        .get("sec-fetch-dest")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("document") | Some("iframe") => true,
+        Some(_) => false,
+        None => true,
+    }
 }
 
 fn ens_lookup_failed_response(
