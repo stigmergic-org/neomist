@@ -1,6 +1,6 @@
 import initSqlJs from 'sql.js';
 import { createRequire } from 'node:module';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PATHS, SYNC_STATE_KEYS } from './config.mjs';
 
@@ -53,7 +53,9 @@ function createStore(db) {
         return;
       }
       const bytes = db.export();
-      await writeFile(PATHS.dbPath, bytes);
+      const tempPath = `${PATHS.dbPath}.tmp-${process.pid}-${Date.now()}`;
+      await writeFile(tempPath, bytes);
+      await rename(tempPath, PATHS.dbPath);
       dirty = false;
     },
     getHeadCursorBlockInclusive() {
@@ -202,14 +204,29 @@ function createStore(db) {
         backfillCursorBlockExclusive: this.getBackfillCursorBlockExclusive(),
       });
     },
-    listNames(limit) {
+    listNames(limit, options = {}) {
+      const orderBy = options.sort === 'score'
+        ? `current_analysis.quality_score IS NULL ASC,
+           current_analysis.quality_score DESC,
+           lower(names.name) ASC`
+        : 'lower(names.name) ASC';
       return getAll(
         db,
-        `SELECT node, name, parent_name, is_subdomain, contenthash_protocol, root_cid, source_block,
-                source_tx_hash, last_seen_at, last_probe_status, last_probe_success
+        `SELECT names.node, names.name, names.parent_name, names.is_subdomain, names.contenthash_protocol,
+                names.root_cid, names.source_block, names.source_tx_hash, names.last_seen_at,
+                names.last_probe_status, names.last_probe_success,
+                current_analysis.category AS analysis_category,
+                current_analysis.quality_tier AS analysis_quality_tier,
+                current_analysis.quality_score AS analysis_quality_score,
+                current_analysis.security_risk AS analysis_security_risk,
+                current_analysis.security_threat_type AS analysis_security_threat_type,
+                current_analysis.safe_to_list AS analysis_safe_to_list
          FROM names
-         ORDER BY lower(name) ASC
-         LIMIT ?`,
+         LEFT JOIN analyses AS current_analysis
+           ON current_analysis.root_cid = names.root_cid
+          AND current_analysis.status = 'success'
+          ORDER BY ${orderBy}
+          LIMIT ?`,
         [limit],
       );
     },

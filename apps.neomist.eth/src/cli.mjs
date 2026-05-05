@@ -39,9 +39,11 @@ async function main() {
         await runSyncName(store, args);
         break;
       case 'analyze-name':
+      case 'analyse-name':
         await runAnalyzeName(store, args);
         break;
       case 'analyze-names':
+      case 'analyse-names':
         await runAnalyzeNames(store, parseFlags(args));
         break;
       case 'export-ipfs':
@@ -141,7 +143,8 @@ function runDbStats(store, flags) {
 
 function runListNames(store, flags) {
   const limit = parseIntegerFlag(flags.limit, 50);
-  const rows = store.listNames(limit);
+  const sort = parseListNamesSort(flags.sort);
+  const rows = store.listNames(limit, { sort });
   if (!flags.details) {
     printJson(rows.map((row) => row.name));
     return;
@@ -157,8 +160,23 @@ function runListNames(store, flags) {
     is_subdomain: Boolean(row.is_subdomain),
     last_probe_status: row.last_probe_status,
     last_probe_success: Boolean(row.last_probe_success),
+    analysis: buildAnalysisListSummary(row),
     contenthashes: versionsByNode.get(row.node) ?? [],
   })));
+}
+
+function buildAnalysisListSummary(row) {
+  if (row.analysis_quality_score == null) {
+    return null;
+  }
+  return {
+    category: row.analysis_category,
+    quality_tier: row.analysis_quality_tier,
+    quality_score: row.analysis_quality_score,
+    security_risk: row.analysis_security_risk,
+    security_threat_type: row.analysis_security_threat_type,
+    safe_to_list: row.analysis_safe_to_list == null ? null : Boolean(row.analysis_safe_to_list),
+  };
 }
 
 function runShowName(store, args) {
@@ -239,6 +257,20 @@ function parseOptionalStringFlag(value, label) {
   return String(value);
 }
 
+function parseListNamesSort(value) {
+  const sort = parseOptionalStringFlag(value, 'sort') ?? 'name';
+  switch (sort) {
+    case 'name':
+      return 'name';
+    case 'score':
+    case 'quality-score':
+    case 'quality_score':
+      return 'score';
+    default:
+      throw new Error(`invalid --sort value: ${sort}`);
+  }
+}
+
 function printJson(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -275,9 +307,11 @@ function printCommandHelp(command) {
       printSyncNameHelp();
       return;
     case 'analyze-name':
+    case 'analyse-name':
       printAnalyzeNameHelp();
       return;
     case 'analyze-names':
+    case 'analyse-names':
       printAnalyzeNamesHelp();
       return;
     case 'export-ipfs':
@@ -388,8 +422,10 @@ function printDbStatsHelp() {
 function printListNamesHelp() {
   process.stdout.write(`Usage: node src/cli.mjs list-names [options]\n\n`);
   process.stdout.write(`Print stored names from SQLite.\n\n`);
+  process.stdout.write(`Example: node src/cli.mjs list-names --sort score --limit 10 --details\n\n`);
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --limit N                 number of rows to print (default 50)\n`);
+  process.stdout.write(`  --sort name|score         sort by name (default) or analysis quality score descending\n`);
   process.stdout.write(`  --details                 print full name records and contenthashes\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
 }

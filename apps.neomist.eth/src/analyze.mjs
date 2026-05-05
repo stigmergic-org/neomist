@@ -298,7 +298,13 @@ async function runWacAnalysis({ workDir, model, timeoutMs, memoryLimit }) {
     'Read ipfs-app-analysis-system.md, follow it exactly, analyze analysis-context.json and root, and write strict JSON to analysis.json.',
   ];
 
-  return spawnProcess(PATHS.wacPath, args, { cwd: workDir });
+  return spawnProcess(PATHS.wacPath, args, {
+    cwd: workDir,
+    env: {
+      ...process.env,
+      WAC_HOME_VOLUME_SCOPE_DIR: PATHS.packageRoot,
+    },
+  });
 }
 
 function spawnProcess(command, args, options) {

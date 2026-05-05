@@ -8,7 +8,7 @@ export const PATHS = {
   packageRoot: PACKAGE_ROOT,
   schemaPath: path.join(PACKAGE_ROOT, 'sql', 'schema.sql'),
   stateDir: path.join(PACKAGE_ROOT, 'state'),
-  dbPath: path.join(PACKAGE_ROOT, 'state', 'index.sqlite'),
+  dbPath: process.env.APPS_NEOMIST_DB_PATH || path.join(PACKAGE_ROOT, 'state', 'index.sqlite'),
   ipfsRootDir: path.join(PACKAGE_ROOT, 'ipfs-root'),
   analysisWorkDir: path.join(PACKAGE_ROOT, 'state', 'analysis-work'),
   analysisPromptPath: path.join(PACKAGE_ROOT, 'prompts', 'ipfs-app-analysis-system.md'),

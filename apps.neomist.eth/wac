@@ -62,6 +62,8 @@ Options:
 
 Environment:
     WAC_CONTAINERFILE   Optional path to a custom Containerfile
+    WAC_HOME_VOLUME_SCOPE_DIR
+                        Optional path used for the persistent home volume key
 
 Examples:
     wac bash                    Open shell in container
@@ -320,6 +322,10 @@ fi
 # Set container identity and working directory
 PROJECT_SCOPE_DIR="$(pwd -P)"
 reject_sensitive_mount_dir "$PROJECT_SCOPE_DIR"
+HOME_VOLUME_SCOPE_DIR="$PROJECT_SCOPE_DIR"
+if [ -n "${WAC_HOME_VOLUME_SCOPE_DIR:-}" ]; then
+  HOME_VOLUME_SCOPE_DIR="$(cd "$WAC_HOME_VOLUME_SCOPE_DIR" && pwd -P)"
+fi
 
 MOUNT_HOME_AS_WORKDIR=false
 if [ "$PROJECT_SCOPE_DIR" = "$HOST_HOME_REAL" ]; then
@@ -334,13 +340,14 @@ fi
 CONTAINER_ID="$(generate_container_id)"
 CONTAINER_HOSTNAME="wac-${CONTAINER_ID}"
 CONTAINER_INSTANCE_NAME="${CONTAINER_HOSTNAME}"
-PROJECT_LABEL="$(sanitize_project_label "$(basename "$PROJECT_SCOPE_DIR")")"
-PROJECT_HASH="$(hash_project_scope "$PROJECT_SCOPE_DIR")"
+PROJECT_LABEL="$(sanitize_project_label "$(basename "$HOME_VOLUME_SCOPE_DIR")")"
+PROJECT_HASH="$(hash_project_scope "$HOME_VOLUME_SCOPE_DIR")"
 PROJECT_KEY="${PROJECT_LABEL}-${PROJECT_HASH:0:12}"
 CONTAINER_HOME_VOLUME="${CONTAINER_HOME_VOLUME_PREFIX}-${PROJECT_KEY}"
 
 log_debug "pwd=$PWD"
 log_debug "project_scope_dir=$PROJECT_SCOPE_DIR"
+log_debug "home_volume_scope_dir=$HOME_VOLUME_SCOPE_DIR"
 log_debug "project_key=$PROJECT_KEY"
 log_debug "container_home_volume=$CONTAINER_HOME_VOLUME"
 log_debug "host_config_dir=$HOST_WAC_CONFIG_DIR"
