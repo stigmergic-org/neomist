@@ -136,9 +136,91 @@ async function runExportIpfs(store) {
 }
 
 function runDbStats(store, flags) {
-  printJson(store.getStats({
+  printDbStats(store.getStats({
     category: parseOptionalStringFlag(flags.category, 'category'),
   }));
+}
+
+function printDbStats(stats) {
+  const lines = [];
+  const overview = stats.overview;
+  const coverage = stats.coverage;
+  const appScope = stats.app_scope;
+
+  lines.push('DB Stats');
+  if (stats.filter?.category) {
+    lines.push('');
+    lines.push('Filter');
+    lines.push(`- Category: ${stats.filter.category}`);
+  }
+
+  lines.push('');
+  lines.push('Overview');
+  lines.push(`- Names: ${formatNumber(overview.names)} total`);
+  lines.push(`- Probe success: ${formatNumber(overview.successful_names)} successful, ${formatNumber(overview.failed_or_unprobed_names)} failed/unprobed`);
+  lines.push(`- Versions: ${formatNumber(overview.name_versions)}`);
+  lines.push(`- Probes: ${formatNumber(overview.probes)}`);
+  lines.push(`- Cursors: head ${formatOptionalNumber(overview.head_cursor_block_inclusive)}, backfill ${formatOptionalNumber(overview.backfill_cursor_block_exclusive)}`);
+
+  lines.push('');
+  lines.push('Analysis Coverage');
+  lines.push(`- Covered: ${formatNumber(coverage.current_successful_analyzed_names)}/${formatNumber(coverage.current_successful_names)} current successful names (${formatPercent(coverage.current_successful_analysis_coverage)})`);
+  lines.push(`- Missing: ${formatNumber(coverage.missing_current_successful_analysis_names)}`);
+  lines.push(`- Failed/incomplete attempts: ${formatNumber(coverage.failed_or_incomplete_analyses)}`);
+  lines.push(`- Timed out attempts: ${formatNumber(coverage.timed_out_analyses)}`);
+
+  lines.push('');
+  lines.push('Apps');
+  lines.push(`- Analyzed current names: ${formatNumber(appScope.current_successful_analyzed_apps)}`);
+  lines.push(`- Unique CIDs: ${formatNumber(appScope.unique_root_cids)}`);
+
+  addListSection(lines, 'Categories', stats.apps_by_category, 'category', 'apps', 10);
+  addListSection(lines, 'Quality', stats.quality_tiers, 'quality_tier', 'apps');
+  addListSection(lines, 'Security Risk', stats.security_risks, 'security_risk', 'apps');
+
+  lines.push('');
+  lines.push('Safety');
+  lines.push(`- Safe: ${formatNumber(stats.safe_to_list.safe)}`);
+  lines.push(`- Unsafe: ${formatNumber(stats.safe_to_list.unsafe)}`);
+  lines.push(`- Unknown: ${formatNumber(stats.safe_to_list.unknown)}`);
+
+  lines.push('');
+  lines.push('Threats');
+  lines.push(`- Threatened apps: ${formatNumber(stats.threats.threatened_apps)}`);
+  lines.push(`- High/critical risk apps: ${formatNumber(stats.threats.high_or_critical_risk_apps)}`);
+  addListRows(lines, stats.threat_types, 'threat_type', 'apps', 5);
+
+  addListSection(lines, 'Domain Shape', stats.domain_shape, 'shape', 'apps');
+  addListSection(lines, 'Contenthash Protocol', stats.contenthash_protocols, 'contenthash_protocol', 'apps');
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+function addListSection(lines, title, rows, labelKey, countKey, limit = Number.POSITIVE_INFINITY) {
+  lines.push('');
+  lines.push(title);
+  addListRows(lines, rows, labelKey, countKey, limit);
+}
+
+function addListRows(lines, rows, labelKey, countKey, limit = Number.POSITIVE_INFINITY) {
+  if (!rows || rows.length === 0) {
+    lines.push('- None');
+    return;
+  }
+  for (const row of rows.slice(0, limit)) {
+    lines.push(`- ${row[labelKey] ?? 'unknown'}: ${formatNumber(row[countKey])}`);
+  }
+}
+
+function formatNumber(value) {
+  return Number(value ?? 0).toLocaleString('en-US');
+}
+
+function formatOptionalNumber(value) {
+  return value == null ? 'none' : formatNumber(value);
+}
+
+function formatPercent(value) {
+  return `${((value ?? 0) * 100).toFixed(1)}%`;
 }
 
 function runListNames(store, flags) {
@@ -413,7 +495,7 @@ function printExportIpfsHelp() {
 
 function printDbStatsHelp() {
   process.stdout.write(`Usage: node src/cli.mjs db-stats [options]\n\n`);
-  process.stdout.write(`Print SQLite stats, sync cursors, and app analysis breakdowns.\n\n`);
+  process.stdout.write(`Print compact SQLite stats, sync cursors, and app analysis breakdowns.\n\n`);
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --category CATEGORY       filter app breakdowns to one analysis category (case-insensitive)\n`);
   process.stdout.write(`  -h, --help                show this help\n`);

@@ -435,6 +435,7 @@ function buildStats(db, options) {
        )`,
   ).value;
   const failedOrIncompleteAnalyses = getOne(db, "SELECT COUNT(*) AS value FROM analyses WHERE status != 'success'").value;
+  const timedOutAnalyses = getOne(db, "SELECT COUNT(*) AS value FROM analyses WHERE status = 'timeout'").value;
   const appScope = getAppScopeStats(db, category);
 
   return {
@@ -456,6 +457,7 @@ function buildStats(db, options) {
       current_successful_analyzed_names: successfulCurrentAnalyzedNames,
       missing_current_successful_analysis_names: missingCurrentAnalysisNames,
       failed_or_incomplete_analyses: failedOrIncompleteAnalyses,
+      timed_out_analyses: timedOutAnalyses,
       current_successful_analysis_coverage: ratio(successfulCurrentAnalyzedNames, successfulNames),
     },
     app_scope: appScope,
