@@ -267,6 +267,7 @@ function createStore(db) {
       return getAll(
         db,
         `SELECT names.node, names.name, names.parent_name, names.is_subdomain, names.root_cid,
+                names.source_block, names.source_tx_hash, names.last_seen_at,
                 latest_probe.title, latest_probe.icon_url, latest_probe.manifest_url,
                 latest_analysis.root_cid AS analysis_root_cid,
                 latest_analysis.model AS analysis_model,

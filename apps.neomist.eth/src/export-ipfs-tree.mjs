@@ -4,6 +4,10 @@ import { PATHS } from './config.mjs';
 import { nodeShard } from './filters.mjs';
 
 const CATEGORY_PAGE_SIZE = 250;
+const BEST_RECENT_APPS_CATEGORY_LIMIT = 100;
+const BEST_RECENT_APPS_CANDIDATE_LIMIT = 200;
+const BEST_RECENT_APPS_CATEGORY = 'Best recent apps';
+const BEST_RECENT_APPS_CATEGORY_SLUG = 'best-recent-apps';
 const SEARCH_DOC_PAGE_SIZE = 500;
 const SEARCH_GRAM_SIZE = 3;
 
@@ -32,6 +36,7 @@ async function writeExportTree(store, outputDir) {
   const versionsByNode = groupVersionsByNode(versions);
   const exportedAnalysisCids = new Set();
   const categoryGroups = new Map();
+  const categoryApps = [];
   const searchDocs = [];
   const searchGrams = new Map();
   const generatedAt = new Date().toISOString();
@@ -57,7 +62,11 @@ async function writeExportTree(store, outputDir) {
 
     await writeJsonFile(path.join(outputDir, byNodeRelPath), record);
 
-    addCategoryApp(categoryGroups, row, analysis, byNodeRelPath, analysisRelPath);
+    const categoryApp = buildCategoryApp(row, analysis, byNodeRelPath, analysisRelPath);
+    addCategoryApp(categoryGroups, analysis, categoryApp);
+    if (categoryApp) {
+      categoryApps.push(categoryApp);
+    }
     addSearchDoc(searchDocs, searchGrams, row, analysis);
 
     if (analysis && !exportedAnalysisCids.has(analysis.root_cid)) {
@@ -66,14 +75,15 @@ async function writeExportTree(store, outputDir) {
     }
   }
 
-  await writeCategoryGroups(outputDir, categoryGroups, generatedAt);
+  const specialCategoryGroups = buildSpecialCategoryGroups(categoryApps);
+  await writeCategoryGroups(outputDir, categoryGroups, specialCategoryGroups, generatedAt);
   await writeSearchIndex(outputDir, searchDocs, searchGrams, generatedAt);
 
   const stats = store.getStats();
   await writeJsonFile(path.join(outputDir, 'meta', 'generated.json'), {
     generated_at: generatedAt,
     exported_names: names.length,
-    exported_categories: categoryGroups.size,
+    exported_categories: categoryGroups.size + specialCategoryGroups.length,
     exported_search_docs: searchDocs.length,
   });
   await writeJsonFile(path.join(outputDir, 'meta', 'stats.json'), stats);
@@ -81,7 +91,7 @@ async function writeExportTree(store, outputDir) {
   return {
     exportedNames: names.length,
     exportedAnalyses: exportedAnalysisCids.size,
-    exportedCategories: categoryGroups.size,
+    exportedCategories: categoryGroups.size + specialCategoryGroups.length,
     exportedSearchDocs: searchDocs.length,
   };
 }
@@ -109,10 +119,10 @@ function buildAnalysisSummary(analysis, analysisRelPath) {
   };
 }
 
-function addCategoryApp(categoryGroups, row, analysis, nameRelPath, analysisRelPath) {
+function addCategoryApp(categoryGroups, analysis, categoryApp) {
   const result = analysis?.result;
   const category = result?.category;
-  if (!category) {
+  if (!category || !categoryApp) {
     return;
   }
 
@@ -123,7 +133,17 @@ function addCategoryApp(categoryGroups, row, analysis, nameRelPath, analysisRelP
     apps: [],
   };
 
-  group.apps.push({
+  group.apps.push(categoryApp);
+  categoryGroups.set(category, group);
+}
+
+function buildCategoryApp(row, analysis, nameRelPath, analysisRelPath) {
+  const result = analysis?.result;
+  if (!result) {
+    return null;
+  }
+
+  return {
     node: row.node,
     name: row.name,
     parent_name: row.parent_name,
@@ -134,6 +154,9 @@ function addCategoryApp(categoryGroups, row, analysis, nameRelPath, analysisRelP
     root_cid: analysis.root_cid,
     name_path: nameRelPath,
     analysis_path: analysisRelPath,
+    contenthash_set_block: row.source_block,
+    contenthash_set_tx_hash: row.source_tx_hash,
+    last_seen_at: row.last_seen_at,
     analyzed_at: analysis.analyzed_at,
     summary: result.summary ?? null,
     category_confidence: result.category_confidence ?? null,
@@ -142,12 +165,35 @@ function addCategoryApp(categoryGroups, row, analysis, nameRelPath, analysisRelP
     security_risk: result.security?.risk ?? null,
     threat_type: result.security?.threat_type ?? null,
     safe_to_list: result.security?.safe_to_list ?? null,
-  });
-  categoryGroups.set(category, group);
+  };
 }
 
-async function writeCategoryGroups(outputDir, categoryGroups, generatedAt) {
-  const groups = [...categoryGroups.values()].sort((left, right) => left.category.localeCompare(right.category));
+function buildSpecialCategoryGroups(categoryApps) {
+  if (categoryApps.length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      category: BEST_RECENT_APPS_CATEGORY,
+      slug: BEST_RECENT_APPS_CATEGORY_SLUG,
+      special: true,
+      selection: 'most_recent',
+      selection_limit: BEST_RECENT_APPS_CATEGORY_LIMIT,
+      candidate_limit: BEST_RECENT_APPS_CANDIDATE_LIMIT,
+      sort: 'quality_score_desc',
+      apps: [...categoryApps]
+        .sort(compareRecentApps)
+        .slice(0, BEST_RECENT_APPS_CANDIDATE_LIMIT)
+        .sort(compareCategoryApps)
+        .slice(0, BEST_RECENT_APPS_CATEGORY_LIMIT),
+    },
+  ];
+}
+
+async function writeCategoryGroups(outputDir, categoryGroups, specialCategoryGroups, generatedAt) {
+  const groups = [...categoryGroups.values(), ...specialCategoryGroups]
+    .sort((left, right) => left.category.localeCompare(right.category));
 
   for (const group of groups) {
     group.apps.sort(compareCategoryApps);
@@ -168,6 +214,7 @@ async function writeCategoryGroups(outputDir, categoryGroups, generatedAt) {
       await writeJsonFile(path.join(outputDir, 'names', 'by-category', group.slug, fileName), {
         category: group.category,
         slug: group.slug,
+        ...categoryGroupMetadata(group),
         generated_at: generatedAt,
         page_size: CATEGORY_PAGE_SIZE,
         page_index: index,
@@ -181,6 +228,7 @@ async function writeCategoryGroups(outputDir, categoryGroups, generatedAt) {
     await writeJsonFile(path.join(outputDir, 'names', 'by-category', group.slug, 'index.json'), {
       category: group.category,
       slug: group.slug,
+      ...categoryGroupMetadata(group),
       generated_at: generatedAt,
       count: group.apps.length,
       page_size: CATEGORY_PAGE_SIZE,
@@ -195,12 +243,27 @@ async function writeCategoryGroups(outputDir, categoryGroups, generatedAt) {
     categories: groups.map((group) => ({
       category: group.category,
       slug: group.slug,
+      ...categoryGroupMetadata(group),
       count: group.apps.length,
       path: `${group.slug}/index.json`,
       page_size: CATEGORY_PAGE_SIZE,
       page_count: Math.ceil(group.apps.length / CATEGORY_PAGE_SIZE),
     })),
   });
+}
+
+function categoryGroupMetadata(group) {
+  if (group.special !== true) {
+    return {};
+  }
+
+  return {
+    special: true,
+    selection: group.selection,
+    selection_limit: group.selection_limit,
+    candidate_limit: group.candidate_limit,
+    sort: group.sort,
+  };
 }
 
 function chunkApps(apps, pageSize) {
@@ -348,6 +411,31 @@ function compareCategoryApps(left, right) {
     return rightScore - leftScore;
   }
   return left.name.localeCompare(right.name);
+}
+
+function compareRecentApps(left, right) {
+  const leftBlock = numericValue(left.contenthash_set_block, -1);
+  const rightBlock = numericValue(right.contenthash_set_block, -1);
+  if (rightBlock !== leftBlock) {
+    return rightBlock - leftBlock;
+  }
+
+  const leftSeen = Date.parse(left.last_seen_at ?? '') || 0;
+  const rightSeen = Date.parse(right.last_seen_at ?? '') || 0;
+  if (rightSeen !== leftSeen) {
+    return rightSeen - leftSeen;
+  }
+
+  return left.name.localeCompare(right.name);
+}
+
+function numericValue(value, fallback) {
+  if (value == null) {
+    return fallback;
+  }
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function categorySlug(category) {
