@@ -3,9 +3,10 @@ import { analyzeMissingNames, analyzeName } from './analyze.mjs';
 import { DEFAULTS } from './config.mjs';
 import { openStore } from './db.mjs';
 import { exportIpfsTree } from './export-ipfs-tree.mjs';
+import { publishIpfsRootToEns } from './publish-ens.mjs';
 import { syncName, syncNames } from './sync-names.mjs';
 
-const BOOLEAN_FLAGS = new Set(['details', 'force', 'full-backfill', 'retry-failed', 'skip-probe']);
+const BOOLEAN_FLAGS = new Set(['details', 'dry-run', 'force', 'full-backfill', 'no-pin', 'retry-failed', 'skip-probe']);
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
@@ -26,6 +27,11 @@ async function main() {
 
   if (isHelpRequested(args)) {
     printCommandHelp(command);
+    return;
+  }
+
+  if (command === 'publish-ens') {
+    await runPublishEns(parseFlags(args));
     return;
   }
 
@@ -132,6 +138,22 @@ async function runAnalyzeNames(store, flags) {
 
 async function runExportIpfs(store) {
   const summary = await exportIpfsTree(store);
+  printJson(summary);
+}
+
+async function runPublishEns(flags) {
+  const summary = await publishIpfsRootToEns({
+    name: parseOptionalStringFlag(flags.name, 'name'),
+    rootCid: parseOptionalStringFlag(flags.cid, 'cid'),
+    rpcUrl: parseOptionalStringFlag(flags['rpc-url'], 'rpc-url'),
+    kuboRpcUrl: parseOptionalStringFlag(flags['kubo-rpc-url'], 'kubo-rpc-url'),
+    envPath: parseOptionalStringFlag(flags['env-file'], 'env-file'),
+    maxGasPriceMwei: parseOptionalStringFlag(flags['max-gas-price-mwei'], 'max-gas-price-mwei'),
+    publishCooldownDays: parseOptionalStringFlag(flags['publish-cooldown-days'], 'publish-cooldown-days'),
+    pin: !flags['no-pin'],
+    dryRun: Boolean(flags['dry-run']),
+    logger: logInfo,
+  });
   printJson(summary);
 }
 
@@ -399,6 +421,9 @@ function printCommandHelp(command) {
     case 'export-ipfs':
       printExportIpfsHelp();
       return;
+    case 'publish-ens':
+      printPublishEnsHelp();
+      return;
     case 'db-stats':
       printDbStatsHelp();
       return;
@@ -424,6 +449,7 @@ function printGeneralHelp() {
   process.stdout.write(`  analyze-name          analyze one synced name through WAC/OpenCode\n`);
   process.stdout.write(`  analyze-names         analyze synced names with unattempted current CID\n`);
   process.stdout.write(`  export-ipfs           export successful current names into ipfs-root\n`);
+  process.stdout.write(`  publish-ens           add ipfs-root to IPFS and publish its CID to apps.neomist.eth\n`);
   process.stdout.write(`  db-stats              print SQLite stats\n`);
   process.stdout.write(`  list-names            print stored names (default limit 50)\n`);
   process.stdout.write(`  show-name             print one name or node plus latest probe\n`);
@@ -490,6 +516,24 @@ function printExportIpfsHelp() {
   process.stdout.write(`Export current names with successful latest probe into ipfs-root.\n`);
   process.stdout.write(`Existing files in ipfs-root are not deleted.\n\n`);
   process.stdout.write(`Options:\n`);
+  process.stdout.write(`  -h, --help                show this help\n`);
+}
+
+function printPublishEnsHelp() {
+  process.stdout.write(`Usage: node src/cli.mjs publish-ens [options]\n\n`);
+  process.stdout.write(`Add ipfs-root through Kubo RPC, then set ENS contenthash for apps.neomist.eth.\n`);
+  process.stdout.write(`Publishing is skipped unless gas price is below --max-gas-price-mwei and no local publish marker exists within --publish-cooldown-days.\n`);
+  process.stdout.write(`Reads private key from .env using APPS_NEOMIST_ENS_PRIVATE_KEY, ENS_PRIVATE_KEY, or PRIVATE_KEY.\n\n`);
+  process.stdout.write(`Options:\n`);
+  process.stdout.write(`  --name NAME               ENS name to update (default apps.neomist.eth)\n`);
+  process.stdout.write(`  --cid CID                 publish an existing IPFS root CID instead of adding ipfs-root\n`);
+  process.stdout.write(`  --rpc-url URL             Ethereum mainnet RPC URL (env APPS_NEOMIST_ETH_RPC_URL, ETH_RPC_URL, MAINNET_RPC_URL, or RPC_URL)\n`);
+  process.stdout.write(`  --kubo-rpc-url URL        Kubo RPC API URL or multiaddr (default ${DEFAULTS.kuboRpcUrl})\n`);
+  process.stdout.write(`  --env-file PATH           dotenv file to load before defaults\n`);
+  process.stdout.write(`  --max-gas-price-mwei N    max gas price before skipping publish (default 400)\n`);
+  process.stdout.write(`  --publish-cooldown-days N days after local publish marker before publishing again (default 3)\n`);
+  process.stdout.write(`  --no-pin                  add ipfs-root without pinning blocks\n`);
+  process.stdout.write(`  --dry-run                 compute CID and contenthash without sending transaction\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
 }
 
