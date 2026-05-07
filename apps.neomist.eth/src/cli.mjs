@@ -55,6 +55,9 @@ async function main() {
       case 'export-ipfs':
         await runExportIpfs(store);
         break;
+      case 'daily':
+        await runDaily(store, parseFlags(args));
+        break;
       case 'db-stats':
         runDbStats(store, parseFlags(args));
         break;
@@ -142,7 +145,45 @@ async function runExportIpfs(store) {
 }
 
 async function runPublishEns(flags) {
-  const summary = await publishIpfsRootToEns({
+  const summary = await publishIpfsRootToEns(buildPublishEnsOptions(flags));
+  printJson(summary);
+}
+
+async function runDaily(store, flags) {
+  logInfo('daily: sync-names');
+  const sync = await syncNames(store, {
+    limit: flags['full-backfill'] ? Number.POSITIVE_INFINITY : parseIntegerFlag(flags['sync-limit'], DEFAULTS.syncLimit),
+    eventBatchSize: parseIntegerFlag(flags['batch-size'], DEFAULTS.eventBatchSize),
+    kuboRpcUrl: flags['kubo-rpc-url'] ?? DEFAULTS.kuboRpcUrl,
+    headReplayBlocks: parseIntegerFlag(flags['head-replay-blocks'], DEFAULTS.headReplayBlocks),
+    probeConcurrency: parseIntegerFlag(flags['probe-concurrency'], DEFAULTS.probeConcurrency),
+    timeoutMs: parseIntegerFlag(flags['sync-timeout-ms'] ?? flags['timeout-ms'], DEFAULTS.timeoutMs),
+    maxBytes: parseIntegerFlag(flags['max-bytes'], DEFAULTS.maxBytes),
+    logger: logInfo,
+  });
+
+  logInfo('daily: analyze-names');
+  const analysis = await analyzeMissingNames(store, {
+    limit: parseIntegerFlag(flags['analysis-limit'], 500),
+    model: flags.model ?? DEFAULTS.analysisModel,
+    memoryLimit: flags['memory-limit'] ?? DEFAULTS.analysisMemoryLimit,
+    timeoutMs: parseIntegerFlag(flags['analysis-timeout-ms'], DEFAULTS.analysisTimeoutMs),
+    force: Boolean(flags.force),
+    retryFailed: Boolean(flags['retry-failed']),
+    logger: logInfo,
+  });
+
+  logInfo('daily: export-ipfs');
+  const exported = await exportIpfsTree(store);
+
+  logInfo('daily: publish-ens');
+  const publish = await publishIpfsRootToEns(buildPublishEnsOptions(flags));
+
+  printJson({ sync, analysis, export: exported, publish });
+}
+
+function buildPublishEnsOptions(flags) {
+  return {
     name: parseOptionalStringFlag(flags.name, 'name'),
     rootCid: parseOptionalStringFlag(flags.cid, 'cid'),
     rpcUrl: parseOptionalStringFlag(flags['rpc-url'], 'rpc-url'),
@@ -153,8 +194,7 @@ async function runPublishEns(flags) {
     pin: !flags['no-pin'],
     dryRun: Boolean(flags['dry-run']),
     logger: logInfo,
-  });
-  printJson(summary);
+  };
 }
 
 function runDbStats(store, flags) {
@@ -424,6 +464,9 @@ function printCommandHelp(command) {
     case 'publish-ens':
       printPublishEnsHelp();
       return;
+    case 'daily':
+      printDailyHelp();
+      return;
     case 'db-stats':
       printDbStatsHelp();
       return;
@@ -450,6 +493,7 @@ function printGeneralHelp() {
   process.stdout.write(`  analyze-names         analyze synced names with unattempted current CID\n`);
   process.stdout.write(`  export-ipfs           export successful current names into ipfs-root\n`);
   process.stdout.write(`  publish-ens           add ipfs-root to IPFS and publish its CID to apps.neomist.eth\n`);
+  process.stdout.write(`  daily                 sync, analyze, export ipfs-root, and conditionally publish ENS\n`);
   process.stdout.write(`  db-stats              print SQLite stats\n`);
   process.stdout.write(`  list-names            print stored names (default limit 50)\n`);
   process.stdout.write(`  show-name             print one name or node plus latest probe\n`);
@@ -534,6 +578,34 @@ function printPublishEnsHelp() {
   process.stdout.write(`  --publish-cooldown-days N days after local publish marker before publishing again (default 3)\n`);
   process.stdout.write(`  --no-pin                  add ipfs-root without pinning blocks\n`);
   process.stdout.write(`  --dry-run                 compute CID and contenthash without sending transaction\n`);
+  process.stdout.write(`  -h, --help                show this help\n`);
+}
+
+function printDailyHelp() {
+  process.stdout.write(`Usage: node src/cli.mjs daily [options]\n\n`);
+  process.stdout.write(`Run sync-names, analyze-names, export-ipfs, then publish-ens.\n`);
+  process.stdout.write(`Publishing remains conditional on gas price and local publish cooldown.\n\n`);
+  process.stdout.write(`Options:\n`);
+  process.stdout.write(`  --sync-limit N            max historical names to backfill during sync (default ${DEFAULTS.syncLimit})\n`);
+  process.stdout.write(`  --analysis-limit N        max names to analyze (default 500)\n`);
+  process.stdout.write(`  --full-backfill           backfill until no older contenthash events remain\n`);
+  process.stdout.write(`  --batch-size N            ENSNode event page size (default ${DEFAULTS.eventBatchSize})\n`);
+  process.stdout.write(`  --kubo-rpc-url URL        Kubo RPC API URL or multiaddr (default ${DEFAULTS.kuboRpcUrl})\n`);
+  process.stdout.write(`  --head-replay-blocks N    recent block replay window for head sync (default ${DEFAULTS.headReplayBlocks})\n`);
+  process.stdout.write(`  --probe-concurrency N     concurrent Kubo probes (default ${DEFAULTS.probeConcurrency})\n`);
+  process.stdout.write(`  --sync-timeout-ms N       probe timeout during sync (default ${DEFAULTS.timeoutMs})\n`);
+  process.stdout.write(`  --analysis-timeout-ms N   per-name analysis timeout (default ${DEFAULTS.analysisTimeoutMs})\n`);
+  process.stdout.write(`  --max-bytes N             max probe body bytes (default ${DEFAULTS.maxBytes})\n`);
+  process.stdout.write(`  --model MODEL             opencode model (default ${DEFAULTS.analysisModel})\n`);
+  process.stdout.write(`  --memory-limit N          WAC container memory limit (default ${DEFAULTS.analysisMemoryLimit})\n`);
+  process.stdout.write(`  --retry-failed            include CIDs with failed, timeout, or invalid prior analysis\n`);
+  process.stdout.write(`  --name NAME               ENS name to update (default apps.neomist.eth)\n`);
+  process.stdout.write(`  --rpc-url URL             Ethereum mainnet RPC URL\n`);
+  process.stdout.write(`  --env-file PATH           dotenv file to load before defaults\n`);
+  process.stdout.write(`  --max-gas-price-mwei N    max gas price before skipping publish (default 400)\n`);
+  process.stdout.write(`  --publish-cooldown-days N days after local publish marker before publishing again (default 3)\n`);
+  process.stdout.write(`  --no-pin                  add ipfs-root without pinning blocks\n`);
+  process.stdout.write(`  --dry-run                 do not send ENS transaction\n`);
   process.stdout.write(`  -h, --help                show this help\n`);
 }
 

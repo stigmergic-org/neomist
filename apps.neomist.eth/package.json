@@ -10,6 +10,7 @@
     "analyze-names": "node src/cli.mjs analyze-names",
     "export-ipfs": "node src/cli.mjs export-ipfs",
     "publish-ens": "node src/cli.mjs publish-ens",
+    "daily": "node src/cli.mjs daily",
     "db-stats": "node src/cli.mjs db-stats",
     "list-names": "node src/cli.mjs list-names",
     "show-name": "node src/cli.mjs show-name",
