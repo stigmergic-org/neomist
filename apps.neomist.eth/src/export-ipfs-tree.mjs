@@ -5,9 +5,10 @@ import { nodeShard } from './filters.mjs';
 
 const CATEGORY_PAGE_SIZE = 250;
 const BEST_RECENT_APPS_CATEGORY_LIMIT = 100;
-const BEST_RECENT_APPS_CANDIDATE_LIMIT = 200;
+const BEST_RECENT_APPS_MIN_QUALITY_SCORE = 0.5;
 const BEST_RECENT_APPS_CATEGORY = 'Best recent apps';
 const BEST_RECENT_APPS_CATEGORY_SLUG = 'best-recent-apps';
+const BEST_RECENT_APPS_EXCLUDED_CATEGORIES = new Set(['redirect', 'unknown', 'unavailable']);
 const SEARCH_DOC_PAGE_SIZE = 500;
 const SEARCH_GRAM_SIZE = 3;
 
@@ -64,7 +65,7 @@ async function writeExportTree(store, outputDir) {
 
     const categoryApp = buildCategoryApp(row, analysis, byNodeRelPath, analysisRelPath);
     addCategoryApp(categoryGroups, analysis, categoryApp);
-    if (categoryApp) {
+    if (categoryApp && isBestRecentAppCandidate(analysis)) {
       categoryApps.push(categoryApp);
     }
     addSearchDoc(searchDocs, searchGrams, row, analysis);
@@ -180,15 +181,23 @@ function buildSpecialCategoryGroups(categoryApps) {
       special: true,
       selection: 'most_recent',
       selection_limit: BEST_RECENT_APPS_CATEGORY_LIMIT,
-      candidate_limit: BEST_RECENT_APPS_CANDIDATE_LIMIT,
+      min_quality_score: BEST_RECENT_APPS_MIN_QUALITY_SCORE,
       sort: 'quality_score_desc',
       apps: [...categoryApps]
         .sort(compareRecentApps)
-        .slice(0, BEST_RECENT_APPS_CANDIDATE_LIMIT)
+        .slice(0, BEST_RECENT_APPS_CATEGORY_LIMIT)
         .sort(compareCategoryApps)
-        .slice(0, BEST_RECENT_APPS_CATEGORY_LIMIT),
     },
   ];
+}
+
+function isBestRecentAppCandidate(analysis) {
+  const category = analysis?.result?.category;
+  const qualityScore = analysis?.result?.quality?.score;
+  return category
+    && !BEST_RECENT_APPS_EXCLUDED_CATEGORIES.has(String(category).toLowerCase())
+    && typeof qualityScore === 'number'
+    && qualityScore >= BEST_RECENT_APPS_MIN_QUALITY_SCORE;
 }
 
 async function writeCategoryGroups(outputDir, categoryGroups, specialCategoryGroups, generatedAt) {
@@ -261,7 +270,7 @@ function categoryGroupMetadata(group) {
     special: true,
     selection: group.selection,
     selection_limit: group.selection_limit,
-    candidate_limit: group.candidate_limit,
+    min_quality_score: group.min_quality_score,
     sort: group.sort,
   };
 }
