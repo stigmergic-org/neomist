@@ -149,6 +149,7 @@ export async function fetchDomainsByIds({ ensnodeUrl, ids }) {
             name
           }
           resolver {
+            id
             address
             contentHash
           }
@@ -159,6 +160,54 @@ export async function fetchDomainsByIds({ ensnodeUrl, ids }) {
     results.push(...(data.domains ?? []));
   }
   return results;
+}
+
+export async function fetchDomainByName({ ensnodeUrl, name }) {
+  const data = await graphqlRequest(
+    ensnodeUrl,
+    `query DomainByName($name: String!) {
+      domains(first: 1, where: { name: $name }) {
+        id
+        name
+        parent {
+          name
+        }
+        resolver {
+          id
+          address
+          contentHash
+        }
+      }
+    }`,
+    { name },
+  );
+
+  return data.domains?.[0] ?? null;
+}
+
+export async function fetchLatestContenthashEventForResolver({ ensnodeUrl, resolverId }) {
+  if (!resolverId) {
+    return null;
+  }
+
+  const data = await graphqlRequest(
+    ensnodeUrl,
+    `query LatestResolverContenthash($resolverId: String!) {
+      contenthashChangeds(first: 1, orderBy: blockNumber, orderDirection: desc, where: { resolver: $resolverId }) {
+        id
+        blockNumber
+        transactionID
+        resolver {
+          domain {
+            id
+          }
+        }
+      }
+    }`,
+    { resolverId },
+  );
+
+  return data.contenthashChangeds?.[0] ?? null;
 }
 
 async function graphqlRequest(endpoint, query, variables) {
