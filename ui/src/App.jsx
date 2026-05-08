@@ -1,7 +1,6 @@
 import { generateFoamSvg } from '@simplepg/foam-identicon';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-const STARTER_DOMAINS = ['zfi.wei', 'ens.eth', 'simplepage.eth', 'jthor.eth', 'beta.walletbeat.eth', 'vitalik.eth', 'evmnow.eth'];
 const CHECKPOINT_REFRESH_MS = 60000;
 const SEEDING_REFRESH_MS = 30000;
 const PROVIDER_REFRESH_MS = 60000;
@@ -49,9 +48,214 @@ const INPUT_CLASS =
   'vapor-input h-14 w-full rounded-xl border border-base-300 bg-base-100/85 px-4 text-base outline-none transition placeholder:text-base-content/35';
 const CHIP_BUTTON_CLASS =
   'vapor-chip-button rounded-full border border-base-300 px-4 py-2 text-sm font-medium text-base-content';
+const APPS_NEOMIST_ORIGIN = 'https://apps.neomist.eth';
+const APPS_SEARCH_RESULT_LIMIT = 6;
+const APPS_SEARCH_CANDIDATE_LIMIT = 72;
+const APPS_CATEGORY_PREVIEW_LIMIT = 5;
+const APPS_CATEGORY_SKELETON_COUNT = 6;
+const APPS_DEFAULT_CATEGORY_SLUG = 'best-recent-apps';
+const APPS_HIDDEN_CATEGORY_SLUGS = new Set(['redirect', 'unavailable', 'unknown']);
+const appsCatalogJsonCache = new Map();
 
 function classNames(...values) {
   return values.filter(Boolean).join(' ');
+}
+
+function normalizeAppsCatalogPath(value) {
+  return value.startsWith('/') ? value : `/${value}`;
+}
+
+function formatCatalogPageIndex(value) {
+  return String(value).padStart(4, '0');
+}
+
+function fillCatalogTemplate(template, values) {
+  return template
+    .replace('{page}', formatCatalogPageIndex(values.page ?? 0))
+    .replace('{shard}', values.shard ?? '');
+}
+
+function buildAppsCatalogBasePath(rootCid) {
+  return `https://${rootCid}.ipfs.localhost`;
+}
+
+function normalizeGatewayCidToken(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  let token = value.trim();
+  token = token.replace(/^W\//i, '').trim();
+
+  if ((token.startsWith('"') && token.endsWith('"')) || (token.startsWith("'") && token.endsWith("'"))) {
+    token = token.slice(1, -1);
+  }
+
+  if (token.startsWith('/ipfs/')) {
+    token = token.slice('/ipfs/'.length);
+  }
+
+  token = token.split('/')[0]?.trim() || '';
+  return /^[A-Za-z0-9]+$/.test(token) ? token : '';
+}
+
+function parseAppsRootCid(headers) {
+  const ipfsPath = headers.get('x-ipfs-path');
+  if (ipfsPath) {
+    const pathMatch = ipfsPath.match(/\/ipfs\/([A-Za-z0-9]+)/i);
+    if (pathMatch?.[1]) {
+      return pathMatch[1];
+    }
+  }
+
+  const roots = headers.get('x-ipfs-roots');
+  if (roots) {
+    for (const part of roots.split(',')) {
+      const cid = normalizeGatewayCidToken(part);
+      if (cid) {
+        return cid;
+      }
+    }
+  }
+
+  return normalizeGatewayCidToken(headers.get('etag'));
+}
+
+function resolveAppIconUrl(app) {
+  if (!app || typeof app.root_cid !== 'string' || app.root_cid.length === 0 || typeof app.icon_url !== 'string' || app.icon_url.length === 0) {
+    return '';
+  }
+
+  const appBaseUrl = `${buildAppsCatalogBasePath(app.root_cid)}/`;
+
+  try {
+    if (/^ipfs:\/\//i.test(app.icon_url) || /^ipns:\/\//i.test(app.icon_url)) {
+      const url = new URL(app.icon_url);
+      return `${buildAppsCatalogBasePath(app.root_cid)}${url.pathname}${url.search}${url.hash}`;
+    }
+
+    return new URL(app.icon_url, appBaseUrl).toString();
+  } catch {
+    return '';
+  }
+}
+
+async function fetchAppsCatalogJson(basePath, path) {
+  const normalizedPath = normalizeAppsCatalogPath(path);
+  const cacheKey = `${basePath}${normalizedPath}`;
+
+  if (!appsCatalogJsonCache.has(cacheKey)) {
+    appsCatalogJsonCache.set(
+      cacheKey,
+      fetch(`${basePath}${normalizedPath}`)
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`Failed to load ${normalizedPath} from ${basePath}`);
+          }
+
+          return response.json();
+        })
+        .catch((error) => {
+          appsCatalogJsonCache.delete(cacheKey);
+          throw error;
+        })
+    );
+  }
+
+  return appsCatalogJsonCache.get(cacheKey);
+}
+
+function searchTokens(values, minLength = 3) {
+  return values
+    .filter((value) => value != null)
+    .flatMap((value) => String(value).toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter((token) => token.length >= minLength);
+}
+
+function extractSearchGramsFromTokens(tokens, gramSize = 3) {
+  const grams = new Set();
+
+  for (const token of tokens) {
+    for (let index = 0; index <= token.length - gramSize; index += 1) {
+      grams.add(token.slice(index, index + gramSize));
+    }
+  }
+
+  return grams;
+}
+
+function appsSearchShard(gram, shardSize = 2) {
+  return gram.slice(0, shardSize).padEnd(shardSize, '_');
+}
+
+function titleCase(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return '';
+  }
+
+  return value
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function qualityScoreTone(value) {
+  if (typeof value !== 'number') {
+    return 'neutral';
+  }
+
+  if (value >= 0.8) {
+    return 'success';
+  }
+
+  if (value >= 0.55) {
+    return 'info';
+  }
+
+  return 'neutral';
+}
+
+function securityRiskTone(value) {
+  if (value === 'high') {
+    return 'error';
+  }
+
+  if (value === 'medium') {
+    return 'warning';
+  }
+
+  if (value === 'low' || value === 'none') {
+    return 'success';
+  }
+
+  return 'neutral';
+}
+
+function formatQualityScoreLabel(value) {
+  return typeof value === 'number' ? `${Math.round(value * 100)} score` : 'Unscored';
+}
+
+function formatCountLabel(value, noun) {
+  return `${value} ${noun}${value === 1 ? '' : 's'}`;
+}
+
+function shouldDisplayCategory(category) {
+  if (!category || typeof category.slug !== 'string') {
+    return false;
+  }
+
+  return !APPS_HIDDEN_CATEGORY_SLUGS.has(category.slug);
+}
+
+function compareExploreCategories(left, right) {
+  const leftBestRecent = left.slug === APPS_DEFAULT_CATEGORY_SLUG;
+  const rightBestRecent = right.slug === APPS_DEFAULT_CATEGORY_SLUG;
+  if (leftBestRecent !== rightBestRecent) {
+    return leftBestRecent ? -1 : 1;
+  }
+
+  return right.count - left.count || left.category.localeCompare(right.category);
 }
 
 function isMacLikePlatform() {
@@ -202,11 +406,23 @@ function parseRoute(pathname) {
     };
   }
 
+  if (normalized.startsWith('/category/')) {
+    return {
+      page: 'category',
+      categorySlug: decodeRouteSegment(normalized.slice('/category/'.length)),
+      domain: '',
+    };
+  }
+
   return { page: 'not-found', domain: '' };
 }
 
 function toSeedingPath(domain) {
   return `/seeding/${encodeURIComponent(domain)}`;
+}
+
+function toCategoryPath(slug) {
+  return `/category/${encodeURIComponent(slug)}`;
 }
 
 function isSupportedDappHost(hostname) {
@@ -703,6 +919,11 @@ function App() {
       return;
     }
 
+    if (route.page === 'category' && route.categorySlug) {
+      document.title = `${titleCase(route.categorySlug.replace(/-/g, ' '))} - NeoMist`;
+      return;
+    }
+
     if (route.page === 'seeding' && route.domain) {
       document.title = `${route.domain} - NeoMist`;
       return;
@@ -770,6 +991,14 @@ function App() {
             />
           ) : null}
 
+          {route.page === 'category' ? (
+            <CategoryPage
+              categorySlug={route.categorySlug || ''}
+              navigate={navigate}
+              openDapp={openDapp}
+            />
+          ) : null}
+
           {route.page === 'seeding' ? (
             <SeedingPage
               routeDomain={route.domain}
@@ -794,7 +1023,7 @@ function App() {
 }
 
 function Header({ route, navigate, seedingCount }) {
-  const openActive = route.page === 'home';
+  const openActive = route.page === 'home' || route.page === 'category';
   const seedingActive = route.page === 'seeding';
   const settingsActive = route.page === 'settings';
 
@@ -873,13 +1102,64 @@ function Header({ route, navigate, seedingCount }) {
   );
 }
 
-function useEnsSearch(query) {
+function useAppsCatalogBasePath() {
+  const [basePath, setBasePath] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        const response = await fetch(`${APPS_NEOMIST_ORIGIN}/`);
+        if (!response.ok) {
+          throw new Error('Failed to resolve apps.neomist.eth root CID');
+        }
+
+        if (!mounted) {
+          return;
+        }
+
+        const rootCid = parseAppsRootCid(response.headers);
+        if (!rootCid) {
+          throw new Error('apps.neomist.eth root CID missing');
+        }
+
+        setBasePath(buildAppsCatalogBasePath(rootCid));
+        setError('');
+      } catch (err) {
+        console.warn('Failed to resolve apps.neomist.eth root CID:', err);
+        if (!mounted) {
+          return;
+        }
+
+        setBasePath('');
+        setError('Failed to load apps.neomist.eth index.');
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  return { basePath, loading, error };
+}
+
+function useAppsSearch(query, basePath) {
   const [suggestions, setSuggestions] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
 
   useEffect(() => {
     const trimmed = query.trim().toLowerCase();
-    if (trimmed.length < 3) {
+    if (trimmed.length < 3 || !basePath) {
       setSuggestions([]);
       setIsSearching(false);
       return;
@@ -890,64 +1170,115 @@ function useEnsSearch(query) {
 
     const timer = setTimeout(async () => {
       try {
-        let skip = 0;
-        const limit = 100;
-        const maxSkip = 500;
-        let found = [];
+        const index = await fetchAppsCatalogJson(basePath, '/search/index.json');
+        const minQueryLength = typeof index?.min_query_length === 'number' ? index.min_query_length : 3;
+        const gramSize = typeof index?.gram_size === 'number' ? index.gram_size : 3;
+        const gramShardSize = typeof index?.gram_shard_size === 'number' ? index.gram_shard_size : 2;
+        const docPageSize = typeof index?.doc_page_size === 'number' ? index.doc_page_size : 500;
+        const tokens = searchTokens([trimmed], minQueryLength);
 
-        while (found.length < 5 && skip < maxSkip && mounted) {
-          const response = await fetch('https://api.mainnet.ensnode.io/subgraph', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              query: `query Search($search: String!, $skip: Int!) {
-                domains(first: ${limit}, skip: $skip, where: { name_starts_with: $search, resolver_not: null }, orderBy: subdomainCount, orderDirection: desc) {
-                  name
-                  resolver {
-                    contentHash
-                  }
-                }
-              }`,
-              variables: { search: trimmed, skip },
-            }),
-          });
-
-          if (!response.ok) throw new Error('API error');
-          const { data } = await response.json();
-
-          if (!mounted) return;
-
-          if (data && data.domains) {
-            const valid = data.domains
-              .filter((d) => d.resolver?.contentHash?.startsWith('0xe3'))
-              .map((d) => d.name)
-              .filter((name) => name.toLowerCase().includes(trimmed));
-
-            for (const v of valid) {
-              if (!found.includes(v)) {
-                found.push(v);
-              }
-            }
-
-            if (mounted && found.length > 0) {
-              setSuggestions([...found].slice(0, 5));
-            }
-
-            if (found.length >= 5) {
-              break;
-            }
-
-            if (data.domains.length < limit) {
-              break;
-            }
-          } else {
-            break;
+        if (tokens.length === 0) {
+          if (mounted) {
+            setSuggestions([]);
           }
-
-          skip += limit;
+          return;
         }
+
+        const grams = [...extractSearchGramsFromTokens(tokens, gramSize)];
+        const shardTemplate = typeof index?.gram_path_template === 'string' ? index.gram_path_template : 'grams/{shard}.json';
+        const docTemplate = typeof index?.doc_path_template === 'string' ? index.doc_path_template : 'docs/page-{page}.json';
+        const shards = [...new Set(grams.map((gram) => appsSearchShard(gram, gramShardSize)))];
+        const shardEntries = await Promise.all(
+          shards.map(async (shard) => [
+            shard,
+            await fetchAppsCatalogJson(basePath, `/search/${fillCatalogTemplate(shardTemplate, { shard })}`),
+          ])
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        const shardMap = new Map(shardEntries);
+        const candidateScores = new Map();
+
+        for (const gram of grams) {
+          const shard = shardMap.get(appsSearchShard(gram, gramShardSize));
+          const ids = Array.isArray(shard?.grams?.[gram]) ? shard.grams[gram] : [];
+
+          for (const id of ids) {
+            if (typeof id !== 'number') {
+              continue;
+            }
+            candidateScores.set(id, (candidateScores.get(id) ?? 0) + 1);
+          }
+        }
+
+        if (candidateScores.size === 0) {
+          setSuggestions([]);
+          return;
+        }
+
+        const candidateIds = [...candidateScores.entries()]
+          .sort((left, right) => right[1] - left[1] || left[0] - right[0])
+          .slice(0, APPS_SEARCH_CANDIDATE_LIMIT)
+          .map(([id]) => id);
+
+        const pageIndexes = [...new Set(candidateIds.map((id) => Math.floor(id / docPageSize)))];
+        const docPageEntries = await Promise.all(
+          pageIndexes.map(async (pageIndex) => [
+            pageIndex,
+            await fetchAppsCatalogJson(basePath, `/search/${fillCatalogTemplate(docTemplate, { page: pageIndex })}`),
+          ])
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        const docPageMap = new Map(docPageEntries);
+        const nextSuggestions = candidateIds
+          .map((id) => {
+            const pageIndex = Math.floor(id / docPageSize);
+            const page = docPageMap.get(pageIndex);
+            const offset = typeof page?.id_start === 'number' ? id - page.id_start : id % docPageSize;
+            const doc = page?.docs?.[offset];
+
+            if (!doc || typeof doc.n !== 'string') {
+              return null;
+            }
+
+            const normalizedName = doc.n.toLowerCase();
+            const overlap = candidateScores.get(id) ?? 0;
+            const qualityScore = typeof doc.q === 'number' ? doc.q : null;
+            const score =
+              (normalizedName === trimmed ? 10000 : 0) +
+              (normalizedName.startsWith(trimmed) ? 3500 : 0) +
+              (normalizedName.includes(trimmed) ? 1800 : 0) +
+              (typeof doc.k === 'string' && doc.k.toLowerCase().includes(trimmed) ? 500 : 0) +
+              overlap * 120 +
+              (qualityScore ?? 0) * 100;
+
+            return {
+              name: doc.n,
+              category: typeof doc.k === 'string' ? doc.k : '',
+              risk: typeof doc.r === 'string' ? doc.r : '',
+              qualityScore,
+              score,
+            };
+          })
+          .filter(Boolean)
+          .sort(
+            (left, right) =>
+              right.score - left.score ||
+              (right.qualityScore ?? -1) - (left.qualityScore ?? -1) ||
+              left.name.localeCompare(right.name)
+          )
+          .slice(0, APPS_SEARCH_RESULT_LIMIT);
+
+        setSuggestions(nextSuggestions);
       } catch (err) {
-        console.warn('Failed to fetch ENS suggestions:', err);
+        console.warn('Failed to fetch apps.neomist.eth suggestions:', err);
         if (mounted) setSuggestions([]);
       } finally {
         if (mounted) setIsSearching(false);
@@ -958,9 +1289,121 @@ function useEnsSearch(query) {
       mounted = false;
       clearTimeout(timer);
     };
-  }, [query]);
+  }, [basePath, query]);
 
   return { suggestions, isSearching };
+}
+
+function useExploreCategories(basePath) {
+  const [categories, setCategories] = useState([]);
+  const [previewBySlug, setPreviewBySlug] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!basePath) {
+      setCategories([]);
+      setPreviewBySlug({});
+      setLoading(false);
+      return;
+    }
+
+    setCategories([]);
+    setPreviewBySlug({});
+    setLoading(true);
+
+    let mounted = true;
+
+    const load = async () => {
+      let nextCategories = [];
+
+      try {
+        const data = await fetchAppsCatalogJson(basePath, '/names/by-category/index.json');
+        if (!mounted) {
+          return;
+        }
+
+        nextCategories = Array.isArray(data?.categories) ? data.categories : [];
+        setCategories(nextCategories);
+        setPreviewBySlug(
+          Object.fromEntries(
+            nextCategories.map((category) => [
+              category.slug,
+              {
+                apps: [],
+                error: '',
+                loading: category.count > 0,
+              },
+            ])
+          )
+        );
+        setError('');
+
+        for (const category of nextCategories) {
+          if (!(category.count > 0)) {
+            continue;
+          }
+
+          void (async () => {
+            try {
+              const categoryPage = await fetchAppsCatalogJson(
+                basePath,
+                `/names/by-category/${category.slug}/page-0000.json`
+              );
+              if (!mounted) {
+                return;
+              }
+
+              setPreviewBySlug((current) => ({
+                ...current,
+                [category.slug]: {
+                  apps: Array.isArray(categoryPage?.apps)
+                    ? categoryPage.apps.slice(0, APPS_CATEGORY_PREVIEW_LIMIT)
+                    : [],
+                  error: '',
+                  loading: false,
+                },
+              }));
+            } catch (previewError) {
+              console.warn(`Failed to load apps.neomist.eth category ${category.slug}:`, previewError);
+              if (!mounted) {
+                return;
+              }
+
+              setPreviewBySlug((current) => ({
+                ...current,
+                [category.slug]: {
+                  apps: [],
+                  error: 'Preview unavailable.',
+                  loading: false,
+                },
+              }));
+            }
+          })();
+        }
+
+        setLoading(false);
+      } catch (err) {
+        console.warn('Failed to load apps.neomist.eth categories:', err);
+        if (!mounted) {
+          return;
+        }
+
+        setCategories([]);
+        setPreviewBySlug({});
+        setError('Failed to load categories.');
+        setLoading(false);
+      }
+    };
+
+    void load();
+
+    return () => {
+      mounted = false;
+    };
+  }, [basePath]);
+
+  return { categories, previewBySlug, loading, error };
 }
 
 function HomePage({
@@ -983,8 +1426,22 @@ function HomePage({
   const inputRef = useRef(null);
   const containerRef = useRef(null);
   const usesMetaFindShortcut = isMacLikePlatform();
+  const {
+    basePath: appsCatalogBasePath,
+    loading: appsCatalogLoading,
+    error: appsCatalogError,
+  } = useAppsCatalogBasePath();
+  const {
+    categories,
+    previewBySlug,
+    loading: categoriesLoading,
+    error: categoriesError,
+  } = useExploreCategories(appsCatalogBasePath);
+  const orderedCategories = useMemo(() => {
+    return categories.filter(shouldDisplayCategory).sort(compareExploreCategories);
+  }, [categories]);
 
-  const { suggestions, isSearching } = useEnsSearch(value);
+  const { suggestions, isSearching } = useAppsSearch(value, appsCatalogBasePath);
 
   useEffect(() => {
     setSelectedIndex(-1);
@@ -1043,6 +1500,13 @@ function HomePage({
     setInputError('');
   };
 
+  const openSuggestion = (suggestion) => {
+    setValue(suggestion.name);
+    setIsFocused(false);
+    setSelectedIndex(-1);
+    openDapp(suggestion.name);
+  };
+
   return (
     <div className="grid min-h-[calc(100vh-156px)] gap-6 xl:grid-cols-[minmax(0,1.15fr)_420px]">
       <section className={classNames(PANEL_CLASS, 'relative overflow-hidden px-6 py-8 sm:px-8 sm:py-10')}>
@@ -1080,9 +1544,7 @@ function HomePage({
                   } else if (event.key === 'Enter' && selectedIndex >= 0) {
                     event.preventDefault();
                     const selected = suggestions[selectedIndex];
-                    setValue(selected);
-                    setIsFocused(false);
-                    openDapp(selected);
+                    openSuggestion(selected);
                   }
                 }}
                 onChange={(event) => {
@@ -1124,12 +1586,12 @@ function HomePage({
                   {isSearching && suggestions.length === 0 ? (
                     <div className="flex items-center gap-3 px-4 py-3 text-sm text-base-content/55">
                       <span className="loading loading-spinner loading-sm" />
-                      Searching...
+                      Searching apps...
                     </div>
                   ) : (
                     <ul className="py-1">
                       {suggestions.map((suggestion, index) => (
-                        <li key={suggestion}>
+                        <li key={suggestion.name}>
                           <button
                             type="button"
                             className={classNames(
@@ -1137,19 +1599,32 @@ function HomePage({
                               selectedIndex === index ? 'bg-base-200/80 text-primary' : 'hover:bg-base-200/50'
                             )}
                             onMouseEnter={() => setSelectedIndex(index)}
-                            onClick={() => {
-                              setValue(suggestion);
-                              setIsFocused(false);
-                              openDapp(suggestion);
-                            }}
+                            onClick={() => openSuggestion(suggestion)}
                           >
-                            {suggestion}
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate font-medium text-base-content">{suggestion.name}</p>
+                                {suggestion.category || suggestion.risk ? (
+                                  <p className="mt-1 truncate text-xs text-base-content/55">
+                                    {[suggestion.category, suggestion.risk ? `${titleCase(suggestion.risk)} risk` : '']
+                                      .filter(Boolean)
+                                      .join(' • ')}
+                                  </p>
+                                ) : null}
+                              </div>
+
+                              {typeof suggestion.qualityScore === 'number' ? (
+                                <span className="shrink-0 text-xs text-base-content/45">
+                                  {formatQualityScoreLabel(suggestion.qualityScore)}
+                                </span>
+                              ) : null}
+                            </div>
                           </button>
                         </li>
                       ))}
                     </ul>
                   )}
-                  
+
                   {isSearching && suggestions.length > 0 ? (
                     <div className="absolute right-3 top-3">
                       <span className="loading loading-spinner loading-xs text-base-content/40" />
@@ -1174,61 +1649,20 @@ function HomePage({
             </p>
           )}
 
-          <div className={classNames(SUBTLE_PANEL_CLASS, 'mt-12 p-6')}>
-            {recentDomains.length > 0 ? (
-              <div>
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-medium">Recently opened</p>
-                    <p className="mt-1 text-sm text-base-content/60">
-                      Jump back in.
-                    </p>
-                  </div>
+          <RecentDomainsPanel
+            recentDomains={recentDomains}
+            clearRecent={clearRecent}
+            openDapp={openDapp}
+          />
 
-                  <button
-                    type="button"
-                    className="text-sm text-base-content/55 transition hover:text-base-content"
-                    onClick={clearRecent}
-                  >
-                    Clear recent
-                  </button>
-                </div>
-
-                <div className="mt-5 flex flex-wrap gap-3">
-                  {recentDomains.map((domain) => (
-                    <button
-                      key={domain}
-                      type="button"
-                      className={CHIP_BUTTON_CLASS}
-                      onClick={() => openDapp(domain)}
-                    >
-                      {domain}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-
-            <div className={recentDomains.length > 0 ? 'mt-8 border-t border-base-300/60 pt-6' : ''}>
-              <p className="text-sm font-medium">Examples</p>
-              <p className="mt-1 text-sm text-base-content/60">
-                Common dapps you can open in one click.
-              </p>
-
-              <div className="mt-5 flex flex-wrap gap-3">
-                {STARTER_DOMAINS.map((domain) => (
-                  <button
-                    key={domain}
-                    type="button"
-                    className={CHIP_BUTTON_CLASS}
-                    onClick={() => openDapp(domain)}
-                  >
-                    {domain}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+          <ExploreByCategoryPanel
+            categories={orderedCategories}
+            previewBySlug={previewBySlug}
+            navigate={navigate}
+            loading={appsCatalogLoading || categoriesLoading}
+            error={appsCatalogError || categoriesError}
+            openDapp={openDapp}
+          />
         </div>
       </section>
 
@@ -1245,6 +1679,486 @@ function HomePage({
         <CheckpointPanel checkpoints={checkpoints} error={checkpointError} />
       </aside>
     </div>
+  );
+}
+
+function RecentDomainsPanel({ recentDomains, clearRecent, openDapp }) {
+  return (
+    <section className={classNames(SUBTLE_PANEL_CLASS, 'mt-8 p-6')}>
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <p className="text-sm font-medium">Recently opened</p>
+          <p className="mt-1 text-sm text-base-content/60">Jump back in.</p>
+        </div>
+
+        {recentDomains.length > 0 ? (
+          <button
+            type="button"
+            className="text-sm text-base-content/55 transition hover:text-base-content"
+            onClick={clearRecent}
+          >
+            Clear recent
+          </button>
+        ) : null}
+      </div>
+
+      {recentDomains.length === 0 ? (
+        <p className="mt-5 text-sm leading-6 text-base-content/60">
+          No recent apps yet. Open app, then it shows here.
+        </p>
+      ) : (
+        <div className="mt-5 flex flex-wrap gap-3">
+          {recentDomains.map((domain) => (
+            <button
+              key={domain}
+              type="button"
+              className={CHIP_BUTTON_CLASS}
+              onClick={() => openDapp(domain)}
+            >
+              {domain}
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExploreByCategoryPanel({
+  categories,
+  previewBySlug,
+  navigate,
+  loading,
+  error,
+  openDapp,
+}) {
+  return (
+    <section className={classNames(SUBTLE_PANEL_CLASS, 'mt-8 p-6')}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-medium">Explore by category</p>
+          <p className="mt-1 text-sm text-base-content/60">
+            Browse `apps.neomist.eth` index without leaving dashboard.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5">
+        {error ? (
+          <p className="text-sm text-error">{error}</p>
+        ) : loading && categories.length === 0 ? (
+          <div className="grid gap-4">
+            {Array.from({ length: APPS_CATEGORY_SKELETON_COUNT }, (_, index) => (
+              <CategoryCardSkeleton key={index} />
+            ))}
+          </div>
+        ) : categories.length === 0 ? (
+          <p className="text-sm leading-6 text-base-content/60">No categories published yet.</p>
+        ) : (
+          <div className="grid gap-4">
+            {categories.map((category) => {
+              const preview = previewBySlug[category.slug] || { apps: [], error: '', loading: true };
+              const remainingCount = Math.max((category.count || 0) - preview.apps.length, 0);
+
+              return (
+                <article
+                  key={category.slug}
+                  role="button"
+                  tabIndex={0}
+                  className={classNames(
+                    SUBTLE_PANEL_CLASS,
+                    'group flex h-full cursor-pointer flex-col overflow-hidden px-5 py-5 text-left outline-none transition hover:border-base-content/15 hover:bg-base-100/80'
+                  )}
+                  onClick={() => navigate(toCategoryPath(category.slug))}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      navigate(toCategoryPath(category.slug));
+                    }
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-lg font-semibold tracking-tight text-base-content">
+                        {category.category}
+                      </p>
+                      <p className="mt-1 text-sm text-base-content/55">
+                        {formatCountLabel(category.count || 0, 'app')}
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      {category.special ? <StatusPill tone="info">Curated</StatusPill> : null}
+                    </div>
+                  </div>
+
+                  <div className="mt-5 flex-1 space-y-2.5">
+                    {preview.loading ? (
+                      Array.from({ length: APPS_CATEGORY_PREVIEW_LIMIT }, (_, index) => (
+                        <CategoryAppRowSkeleton key={index} />
+                      ))
+                    ) : preview.error ? (
+                      <p className="text-sm leading-6 text-base-content/55">{preview.error}</p>
+                    ) : preview.apps.length === 0 ? (
+                      <p className="text-sm leading-6 text-base-content/55">No apps published for this category yet.</p>
+                    ) : (
+                      preview.apps.map((app) => (
+                        <button
+                          key={`${category.slug}:${app.name}:${app.root_cid}`}
+                          type="button"
+                          className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition hover:bg-base-200/55"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openDapp(app.name);
+                          }}
+                        >
+                          <AppIcon app={app} />
+
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-base-content">
+                              {app.title || app.name}
+                            </p>
+                            <p className="mt-0.5 truncate text-xs text-base-content/50">{app.name}</p>
+                          </div>
+
+                          {typeof app.quality_score === 'number' ? (
+                            <span className="shrink-0 text-xs text-base-content/45">
+                              {Math.round(app.quality_score * 100)}
+                            </span>
+                          ) : null}
+                        </button>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="mt-5 flex items-center justify-between gap-3 border-t border-base-300/60 pt-4 text-xs text-base-content/50">
+                    <span>{preview.loading ? 'Loading apps...' : 'Top apps in category'}</span>
+                    {remainingCount > 0 ? <span>+{remainingCount} more</span> : null}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function useCategoryCatalog(basePath, categorySlug) {
+  const [category, setCategory] = useState(null);
+  const [apps, setApps] = useState([]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!basePath || !categorySlug) {
+      setCategory(null);
+      setApps([]);
+      setLoading(false);
+      return;
+    }
+
+    if (APPS_HIDDEN_CATEGORY_SLUGS.has(categorySlug)) {
+      setCategory(null);
+      setApps([]);
+      setError('Category not available.');
+      setLoading(false);
+      return;
+    }
+
+    let mounted = true;
+    setCategory(null);
+    setApps([]);
+    setPageIndex(0);
+    setLoading(true);
+
+    const load = async () => {
+      try {
+        const categoryIndex = await fetchAppsCatalogJson(basePath, `/names/by-category/${categorySlug}/index.json`);
+        if (!mounted) {
+          return;
+        }
+
+        setCategory(categoryIndex);
+        setError('');
+      } catch (err) {
+        console.warn(`Failed to load apps.neomist.eth category ${categorySlug}:`, err);
+        if (!mounted) {
+          return;
+        }
+
+        setCategory(null);
+        setApps([]);
+        setError('Failed to load category.');
+        setLoading(false);
+      }
+    };
+
+    void load();
+
+    return () => {
+      mounted = false;
+    };
+  }, [basePath, categorySlug]);
+
+  useEffect(() => {
+    if (!basePath || !category) {
+      return;
+    }
+
+    let mounted = true;
+    setLoading(true);
+
+    const load = async () => {
+      const pagePath =
+        typeof category?.pages?.[pageIndex]?.path === 'string'
+          ? category.pages[pageIndex].path
+          : `page-${formatCatalogPageIndex(pageIndex)}.json`;
+
+      try {
+        const categoryPage = await fetchAppsCatalogJson(basePath, `/names/by-category/${category.slug}/${pagePath}`);
+        if (!mounted) {
+          return;
+        }
+
+        setApps(Array.isArray(categoryPage?.apps) ? categoryPage.apps : []);
+        setError('');
+      } catch (err) {
+        console.warn(`Failed to load apps.neomist.eth category page ${category.slug}:${pageIndex}:`, err);
+        if (!mounted) {
+          return;
+        }
+
+        setApps([]);
+        setError('Failed to load category apps.');
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      mounted = false;
+    };
+  }, [basePath, category, pageIndex]);
+
+  return { category, apps, pageIndex, setPageIndex, loading, error };
+}
+
+function CategoryPage({ categorySlug, navigate, openDapp }) {
+  const {
+    basePath: appsCatalogBasePath,
+    loading: appsCatalogLoading,
+    error: appsCatalogError,
+  } = useAppsCatalogBasePath();
+  const { category, apps, pageIndex, setPageIndex, loading: categoryLoading, error: categoryError } =
+    useCategoryCatalog(appsCatalogBasePath, categorySlug);
+  const loading = appsCatalogLoading || categoryLoading;
+  const error = appsCatalogError || categoryError;
+  const pageCount = typeof category?.page_count === 'number' ? category.page_count : 0;
+
+  return (
+    <section className="mx-auto max-w-[1120px]">
+      <div className={classNames(PANEL_CLASS, 'p-8')}>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <button
+              type="button"
+              className="text-sm text-base-content/55 transition hover:text-base-content"
+              onClick={() => navigate('/')}
+            >
+              Back to explore
+            </button>
+            <h1 className="mt-3 text-4xl font-semibold tracking-tight">
+              {category?.category || titleCase(categorySlug.replace(/-/g, ' '))}
+            </h1>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-base-content/65">
+              {category
+                ? `${formatCountLabel(category.count || 0, 'app')} indexed in this category.`
+                : 'Loading category apps from apps.neomist.eth.'}
+            </p>
+          </div>
+
+          {category ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {category.special ? <StatusPill tone="info">Curated</StatusPill> : null}
+              {pageCount > 0 ? <StatusPill tone="neutral">Page {pageIndex + 1} of {pageCount}</StatusPill> : null}
+            </div>
+          ) : null}
+        </div>
+
+        {pageCount > 1 ? (
+          <div className="mt-6 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={SMALL_SECONDARY_BUTTON_CLASS}
+              onClick={() => setPageIndex((current) => Math.max(current - 1, 0))}
+              disabled={pageIndex === 0 || loading}
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              className={SMALL_SECONDARY_BUTTON_CLASS}
+              onClick={() => setPageIndex((current) => Math.min(current + 1, pageCount - 1))}
+              disabled={pageIndex >= pageCount - 1 || loading}
+            >
+              Next
+            </button>
+          </div>
+        ) : null}
+
+        <div className="mt-8">
+          {error ? (
+            <p className="text-sm text-error">{error}</p>
+          ) : loading && !category ? (
+            <div className="grid gap-4">
+              {Array.from({ length: APPS_CATEGORY_PREVIEW_LIMIT }, (_, index) => (
+                <CategoryPageAppSkeleton key={index} />
+              ))}
+            </div>
+          ) : apps.length === 0 ? (
+            <p className="text-sm leading-6 text-base-content/60">No apps in this category.</p>
+          ) : (
+            <div className="grid gap-4">
+              {apps.map((app) => (
+                <button
+                  key={`${categorySlug}:${app.name}:${app.root_cid}`}
+                  type="button"
+                  className={classNames(
+                    SUBTLE_PANEL_CLASS,
+                    'flex w-full flex-col gap-4 px-5 py-5 text-left transition hover:border-base-content/15 hover:bg-base-100/80 sm:flex-row sm:items-start sm:justify-between'
+                  )}
+                  onClick={() => openDapp(app.name)}
+                >
+                  <div className="flex min-w-0 gap-4">
+                    <AppIcon app={app} />
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="truncate text-lg font-semibold tracking-tight text-base-content">
+                          {app.title || app.name}
+                        </p>
+                        {typeof app.quality_score === 'number' ? (
+                          <StatusPill tone={qualityScoreTone(app.quality_score)}>
+                            {formatQualityScoreLabel(app.quality_score)}
+                          </StatusPill>
+                        ) : null}
+                      </div>
+                      <p className="mt-1 text-sm text-base-content/55">{app.name}</p>
+                      <p className="mt-3 max-w-3xl text-sm leading-6 text-base-content/65">
+                        {app.summary || 'Indexed app from apps.neomist.eth.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                    {app.security_risk ? (
+                      <StatusPill tone={securityRiskTone(app.security_risk)}>
+                        {titleCase(app.security_risk)} risk
+                      </StatusPill>
+                    ) : null}
+                    {app.quality_tier ? (
+                      <StatusPill tone={qualityScoreTone(app.quality_score)}>
+                        {titleCase(app.quality_tier)}
+                      </StatusPill>
+                    ) : null}
+                    {app.safe_to_list === false ? (
+                      <StatusPill tone="warning">Review before opening</StatusPill>
+                    ) : null}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CategoryCardSkeleton() {
+  return (
+    <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-2">
+          <div className="skeleton h-5 w-32 rounded-full" />
+          <div className="skeleton h-4 w-16 rounded-full" />
+        </div>
+        <div className="skeleton h-6 w-16 rounded-full" />
+      </div>
+
+      <div className="mt-5 space-y-2.5">
+        {Array.from({ length: APPS_CATEGORY_PREVIEW_LIMIT }, (_, index) => (
+          <CategoryAppRowSkeleton key={index} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CategoryAppRowSkeleton() {
+  return (
+    <div className="flex items-center gap-3 rounded-xl px-2 py-2">
+      <div className="skeleton h-11 w-11 shrink-0 rounded-2xl" />
+      <div className="min-w-0 flex-1 space-y-2">
+        <div className="skeleton h-4 w-28 rounded-full" />
+        <div className="skeleton h-3 w-20 rounded-full" />
+      </div>
+      <div className="skeleton h-4 w-8 rounded-full" />
+    </div>
+  );
+}
+
+function CategoryPageAppSkeleton() {
+  return (
+    <div className={classNames(SUBTLE_PANEL_CLASS, 'p-5')}>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 gap-4">
+          <div className="skeleton h-11 w-11 shrink-0 rounded-2xl" />
+          <div className="min-w-0 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="skeleton h-5 w-40 rounded-full" />
+              <div className="skeleton h-6 w-20 rounded-full" />
+            </div>
+            <div className="skeleton h-4 w-24 rounded-full" />
+            <div className="skeleton h-4 w-80 max-w-full rounded-full" />
+            <div className="skeleton h-4 w-56 max-w-full rounded-full" />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <div className="skeleton h-6 w-20 rounded-full" />
+          <div className="skeleton h-6 w-16 rounded-full" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AppIcon({ app }) {
+  const [failed, setFailed] = useState(false);
+  const src = failed ? '' : resolveAppIconUrl(app);
+  const label = (app?.title || app?.name || '?').trim().slice(0, 1).toUpperCase() || '?';
+
+  return (
+    <span className="relative inline-flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-base-300/70 bg-base-100/80 text-sm font-semibold text-base-content/60 shadow-sm">
+      {src ? (
+        <img
+          src={src}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span>{label}</span>
+      )}
+    </span>
   );
 }
 
@@ -2561,6 +3475,7 @@ function StatusPill({ tone = 'neutral', children }) {
     success: 'border-success/25 bg-success/12 text-success',
     warning: 'border-warning/30 bg-warning/12 text-warning',
     info: 'border-info/30 bg-info/12 text-info',
+    error: 'border-error/30 bg-error/12 text-error',
   };
 
   return (

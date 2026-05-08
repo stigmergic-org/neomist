@@ -10,7 +10,7 @@ use axum::http::{
     header::{
         ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
         ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, CACHE_CONTROL, CONTENT_TYPE,
-        HOST, ORIGIN, REFERER, VARY,
+        HOST, ORIGIN, REFERER, VARY, ACCESS_CONTROL_EXPOSE_HEADERS,
     },
 };
 use axum::response::{IntoResponse, Json};
@@ -310,6 +310,20 @@ fn request_origin_matches_neomist_ui(headers: &HeaderMap) -> bool {
     }
 
     false
+}
+
+fn browser_fetch_origin_for_neomist_ui(headers: &HeaderMap) -> Option<HeaderValue> {
+    let origin = headers.get(ORIGIN)?;
+    url_header_matches_neomist_ui(origin).then(|| origin.clone())
+}
+
+fn add_browser_fetch_cors_headers(headers: &mut HeaderMap, origin: &HeaderValue) {
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+    headers.append(VARY, HeaderValue::from_static("Origin"));
+    headers.insert(
+        ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static("ETag, X-Ipfs-Path, X-Ipfs-Roots"),
+    );
 }
 
 fn url_header_matches_neomist_ui(value: &HeaderValue) -> bool {
@@ -635,8 +649,13 @@ async fn fetch_kubo_version(state: &AppState) -> Option<String> {
         .map(|body| body.version)
 }
 
-async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {
-    ens::proxy_request(&state, request).await
+async fn ens_lookup(State(state): State<AppState>, request: Request<Body>) -> Response<Body> {
+    let cors_origin = browser_fetch_origin_for_neomist_ui(request.headers());
+    let mut response = ens::proxy_request(&state, request).await;
+    if let Some(origin) = cors_origin.as_ref() {
+        add_browser_fetch_cors_headers(response.headers_mut(), origin);
+    }
+    response
 }
 
 async fn web3_lookup(State(state): State<AppState>, request: Request<Body>) -> impl IntoResponse {
@@ -679,6 +698,7 @@ async fn proxy_ipfs_gateway(
     request: Request<Body>,
 ) -> Response<Body> {
     let (parts, body) = request.into_parts();
+    let cors_origin = browser_fetch_origin_for_neomist_ui(&parts.headers);
     let host = parts
         .headers
         .get(HOST)
@@ -698,7 +718,7 @@ async fn proxy_ipfs_gateway(
         url.push_str(query);
     }
 
-    proxy_ipfs_request(
+    let mut response = proxy_ipfs_request(
         parts,
         body,
         url,
@@ -711,7 +731,13 @@ async fn proxy_ipfs_gateway(
             summary: "NeoMist could not load content from local Kubo gateway.",
         }),
     )
-    .await
+    .await;
+
+    if let Some(origin) = cors_origin.as_ref() {
+        add_browser_fetch_cors_headers(response.headers_mut(), origin);
+    }
+
+    response
 }
 
 async fn proxy_ipfs_request(
