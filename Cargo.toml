@@ -43,3 +43,7 @@ tray-icon = { version = "0.21", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libappindicator = "0.9"
+
+[build-dependencies]
+image = "0.25"
+resvg = "0.47"

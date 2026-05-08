@@ -14,7 +14,7 @@ use image::GenericImageView;
 #[cfg(target_os = "linux")]
 use libappindicator::AppIndicator as LinuxAppIndicator;
 #[cfg(target_os = "macos")]
-use std::ffi::{c_char, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use tokio::runtime::Handle;
 use tracing::warn;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -23,14 +23,28 @@ use tray_icon::{Icon, TrayIconBuilder};
 use crate::ipfs::KuboManager;
 
 const APP_NAME: &str = "NeoMist";
+#[cfg(not(target_os = "macos"))]
 const ICON_ACTIVE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/logo-active.png"
 ));
+#[cfg(not(target_os = "macos"))]
 const ICON_INACTIVE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/logo-inactive.png"
 ));
+#[cfg(target_os = "macos")]
+const MACOS_ICON_ACTIVE_LIGHT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/tray-icon-active-light.png"));
+#[cfg(target_os = "macos")]
+const MACOS_ICON_ACTIVE_DARK: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/tray-icon-active-dark.png"));
+#[cfg(target_os = "macos")]
+const MACOS_ICON_INACTIVE_LIGHT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/tray-icon-inactive-light.png"));
+#[cfg(target_os = "macos")]
+const MACOS_ICON_INACTIVE_DARK: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/tray-icon-inactive-dark.png"));
 #[cfg(target_os = "linux")]
 const LINUX_ACTIVE_SYMBOLIC_ICON_NAME: &str = "neomist-active-symbolic";
 #[cfg(target_os = "linux")]
@@ -105,6 +119,42 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 const NS_APPLICATION_ACTIVATION_POLICY_ACCESSORY: isize = 1;
 
+#[cfg(target_os = "macos")]
+struct MacosTrayIcons {
+    active_light: Icon,
+    active_dark: Icon,
+    inactive_light: Icon,
+    inactive_dark: Icon,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosTrayIcons {
+    fn load() -> Result<Self> {
+        Ok(Self {
+            active_light: load_tray_icon(MACOS_ICON_ACTIVE_LIGHT)?,
+            active_dark: load_tray_icon(MACOS_ICON_ACTIVE_DARK)?,
+            inactive_light: load_tray_icon(MACOS_ICON_INACTIVE_LIGHT)?,
+            inactive_dark: load_tray_icon(MACOS_ICON_INACTIVE_DARK)?,
+        })
+    }
+
+    fn active(&self, dark_appearance: bool) -> &Icon {
+        if dark_appearance {
+            &self.active_dark
+        } else {
+            &self.active_light
+        }
+    }
+
+    fn inactive(&self, dark_appearance: bool) -> &Icon {
+        if dark_appearance {
+            &self.inactive_dark
+        } else {
+            &self.inactive_light
+        }
+    }
+}
+
 pub struct TrayState {
     helios_client: Mutex<Option<Arc<EthereumClient>>>,
     kubo_manager: Mutex<Option<Arc<KuboManager>>>,
@@ -174,7 +224,13 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     let event_loop = tao::event_loop::EventLoop::new();
     let mut activation_policy_applied = configure_activation_policy();
 
+    #[cfg(target_os = "macos")]
+    let macos_icons = MacosTrayIcons::load()?;
+    #[cfg(target_os = "macos")]
+    let mut macos_dark_appearance = is_macos_dark_appearance();
+    #[cfg(not(target_os = "macos"))]
     let icon_active = load_tray_icon(ICON_ACTIVE)?;
+    #[cfg(not(target_os = "macos"))]
     let icon_inactive = load_tray_icon(ICON_INACTIVE)?;
     #[cfg(target_os = "linux")]
     let linux_symbolic_icon_dir = Some(prepare_linux_symbolic_icons()?);
@@ -213,12 +269,21 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
     menu.append(&quit_item)
         .wrap_err("Failed to add tray menu")?;
 
+    #[cfg(target_os = "macos")]
+    let initial_icon = macos_icons.inactive(macos_dark_appearance).clone();
+    #[cfg(not(target_os = "macos"))]
+    let initial_icon = icon_inactive.clone();
+
     let tray_icon = TrayIconBuilder::new()
-        .with_icon(icon_inactive.clone())
+        .with_icon(initial_icon)
         .with_menu(Box::new(menu.clone()))
         .with_icon_as_template(false)
         .build()
         .wrap_err("Failed to create tray icon")?;
+    #[cfg(target_os = "macos")]
+    {
+        macos_dark_appearance = is_macos_dark_appearance_for_tray(&tray_icon);
+    }
     activation_policy_applied = activation_policy_applied || configure_activation_policy();
 
     let menu_events = MenuEvent::receiver();
@@ -226,6 +291,15 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
 
     let mut next_tick = Instant::now();
     let initial_networking_enabled = resolve_networking_enabled(&tray_state);
+    #[cfg(target_os = "macos")]
+    update_networking_tray_icon(
+        &tray_icon,
+        initial_networking_enabled,
+        macos_icons.active(macos_dark_appearance),
+        macos_icons.inactive(macos_dark_appearance),
+        linux_symbolic_icon_dir.as_deref(),
+    )?;
+    #[cfg(not(target_os = "macos"))]
     update_networking_tray_icon(
         &tray_icon,
         initial_networking_enabled,
@@ -297,16 +371,37 @@ pub fn run_tray(gas_rx: Receiver<String>, tray_state: Arc<TrayState>) -> Result<
 
             refresh_p2p_menu(&tray_state, &p2p_item);
 
+            #[cfg(target_os = "macos")]
+            let appearance_changed = {
+                let dark_appearance = is_macos_dark_appearance_for_tray(&tray_icon);
+                let changed = dark_appearance != macos_dark_appearance;
+                macos_dark_appearance = dark_appearance;
+                changed
+            };
+            #[cfg(not(target_os = "macos"))]
+            let appearance_changed = false;
+
             let networking_enabled = resolve_networking_enabled(&tray_state);
             refresh_explore_menu(networking_enabled, &explore_item);
-            if last_networking_enabled != Some(networking_enabled) {
-                if let Err(err) = update_networking_tray_icon(
+            if last_networking_enabled != Some(networking_enabled) || appearance_changed {
+                #[cfg(target_os = "macos")]
+                let update_result = update_networking_tray_icon(
+                    &tray_icon,
+                    networking_enabled,
+                    macos_icons.active(macos_dark_appearance),
+                    macos_icons.inactive(macos_dark_appearance),
+                    linux_symbolic_icon_dir.as_deref(),
+                );
+                #[cfg(not(target_os = "macos"))]
+                let update_result = update_networking_tray_icon(
                     &tray_icon,
                     networking_enabled,
                     &icon_active,
                     &icon_inactive,
                     linux_symbolic_icon_dir.as_deref(),
-                ) {
+                );
+
+                if let Err(err) = update_result {
                     warn!("Failed to update tray icon: {err}");
                 } else {
                     last_networking_enabled = Some(networking_enabled);
@@ -443,6 +538,196 @@ unsafe fn msg_send_bool(receiver: ObjcObject, selector: ObjcSelector, value: isi
     let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, isize) -> i8 =
         unsafe { std::mem::transmute(objc_msgSend as *const ()) };
     unsafe { send(receiver, selector, value) != 0 }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_str(receiver: ObjcObject, selector: ObjcSelector) -> *const c_char {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector) -> *const c_char =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { send(receiver, selector) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_id_cstr(
+    receiver: ObjcObject,
+    selector: ObjcSelector,
+    value: *const c_char,
+) -> ObjcObject {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, *const c_char) -> ObjcObject =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { send(receiver, selector, value) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_id_obj(
+    receiver: ObjcObject,
+    selector: ObjcSelector,
+    value: ObjcObject,
+) -> ObjcObject {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, ObjcObject) -> ObjcObject =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { send(receiver, selector, value) }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_void_obj(receiver: ObjcObject, selector: ObjcSelector, value: ObjcObject) {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector, ObjcObject) =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { send(receiver, selector, value) }
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_dark_appearance() -> bool {
+    macos_user_defaults_string("AppleInterfaceStyle").is_some_and(|value| value == "Dark")
+}
+
+#[cfg(target_os = "macos")]
+fn is_macos_dark_appearance_for_tray(tray_icon: &tray_icon::TrayIcon) -> bool {
+    match macos_status_item_foreground_luminance(tray_icon) {
+        Some(luminance) => luminance > 0.6,
+        None => is_macos_dark_appearance(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_status_item_foreground_luminance(tray_icon: &tray_icon::TrayIcon) -> Option<f64> {
+    let status_item = tray_icon.ns_status_item()?;
+    let status_item = (&*status_item) as *const _ as ObjcObject;
+
+    unsafe {
+        let button = msg_send_id(status_item, sel_registerName(b"button\0".as_ptr().cast()));
+        if button.is_null() {
+            return None;
+        }
+
+        let tint = msg_send_id(button, sel_registerName(b"contentTintColor\0".as_ptr().cast()));
+        if !tint.is_null() {
+            return macos_color_luminance(tint);
+        }
+
+        let appearance = msg_send_id(
+            button,
+            sel_registerName(b"effectiveAppearance\0".as_ptr().cast()),
+        );
+        if appearance.is_null() {
+            return None;
+        }
+
+        macos_label_color_luminance_for_appearance(appearance)
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn msg_send_double(receiver: ObjcObject, selector: ObjcSelector) -> f64 {
+    let send: unsafe extern "C" fn(ObjcObject, ObjcSelector) -> f64 =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+    unsafe { send(receiver, selector) }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_color_luminance(color: ObjcObject) -> Option<f64> {
+    unsafe {
+        let rgb_space = macos_ns_string_object("NSCalibratedRGBColorSpace")?;
+        let rgb_color = msg_send_id_obj(
+            color,
+            sel_registerName(b"colorUsingColorSpaceName:\0".as_ptr().cast()),
+            rgb_space,
+        );
+        let color = if rgb_color.is_null() { color } else { rgb_color };
+
+        let red = msg_send_double(color, sel_registerName(b"redComponent\0".as_ptr().cast()));
+        let green = msg_send_double(color, sel_registerName(b"greenComponent\0".as_ptr().cast()));
+        let blue = msg_send_double(color, sel_registerName(b"blueComponent\0".as_ptr().cast()));
+        Some(0.2126 * red + 0.7152 * green + 0.0722 * blue)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_label_color_luminance_for_appearance(appearance: ObjcObject) -> Option<f64> {
+    unsafe {
+        let ns_appearance = objc_getClass(b"NSAppearance\0".as_ptr().cast());
+        let ns_color = objc_getClass(b"NSColor\0".as_ptr().cast());
+        if ns_appearance.is_null() || ns_color.is_null() {
+            return None;
+        }
+
+        let selector_current = sel_registerName(b"currentAppearance\0".as_ptr().cast());
+        let selector_set = sel_registerName(b"setCurrentAppearance:\0".as_ptr().cast());
+        let previous_appearance = msg_send_id(ns_appearance, selector_current);
+        msg_send_void_obj(ns_appearance, selector_set, appearance);
+
+        let label_color = msg_send_id(ns_color, sel_registerName(b"labelColor\0".as_ptr().cast()));
+        let luminance = macos_color_luminance(label_color);
+
+        msg_send_void_obj(ns_appearance, selector_set, previous_appearance);
+        luminance
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_user_defaults_string(key: &str) -> Option<String> {
+    unsafe {
+        let ns_user_defaults = objc_getClass(b"NSUserDefaults\0".as_ptr().cast());
+        if ns_user_defaults.is_null() {
+            return None;
+        }
+
+        let standard_defaults = msg_send_id(
+            ns_user_defaults,
+            sel_registerName(b"standardUserDefaults\0".as_ptr().cast()),
+        );
+        if standard_defaults.is_null() {
+            return None;
+        }
+
+        let key_object = macos_ns_string_object(key)?;
+
+        let value = msg_send_id_obj(
+            standard_defaults,
+            sel_registerName(b"stringForKey:\0".as_ptr().cast()),
+            key_object,
+        );
+        macos_ns_string(value)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ns_string_object(text: &str) -> Option<ObjcObject> {
+    unsafe {
+        let ns_string = objc_getClass(b"NSString\0".as_ptr().cast());
+        if ns_string.is_null() {
+            return None;
+        }
+
+        let mut text_bytes = text.as_bytes().to_vec();
+        text_bytes.push(0);
+        let text_object = msg_send_id_cstr(
+            ns_string,
+            sel_registerName(b"stringWithUTF8String:\0".as_ptr().cast()),
+            text_bytes.as_ptr().cast(),
+        );
+        if text_object.is_null() {
+            return None;
+        }
+
+        Some(text_object)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_ns_string(value: ObjcObject) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let utf8_value = msg_send_str(value, sel_registerName(b"UTF8String\0".as_ptr().cast()));
+        if utf8_value.is_null() {
+            return None;
+        }
+
+        Some(CStr::from_ptr(utf8_value).to_string_lossy().into_owned())
+    }
 }
 
 fn load_tray_icon(bytes: &[u8]) -> Result<Icon> {

@@ -1,8 +1,11 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
+
+use image::RgbaImage;
+use resvg::{tiny_skia, usvg};
 
 const UI_PATHS: &[&str] = &[
     "assets/icon.svg",
@@ -22,11 +25,25 @@ const UI_ASSETS: &[(&str, &str)] = &[
     ("assets/icon-dark.svg", "ui/public/icon-dark.svg"),
 ];
 
+const TRAY_ICON_SVG_PATHS: &[&str] = &["assets/logo-active.svg", "assets/logo-inactive.svg"];
+
+const MACOS_TRAY_ICONS: &[(&str, &str, bool)] = &[
+    ("assets/logo-active.svg", "tray-icon-active-light.png", false),
+    ("assets/logo-active.svg", "tray-icon-active-dark.png", true),
+    ("assets/logo-inactive.svg", "tray-icon-inactive-light.png", false),
+    ("assets/logo-inactive.svg", "tray-icon-inactive-dark.png", true),
+];
+
 fn main() {
     for path in UI_PATHS {
         println!("cargo:rerun-if-changed={path}");
     }
+    for path in TRAY_ICON_SVG_PATHS {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-env-changed=NEOMIST_SKIP_UI_BUILD");
+
+    build_macos_tray_icons();
 
     if env::var_os("NEOMIST_SKIP_UI_BUILD").is_some() {
         println!("cargo:warning=Skipping UI build (NEOMIST_SKIP_UI_BUILD set)");
@@ -164,4 +181,45 @@ fn sync_asset(source: &Path, dest: &Path) {
             panic!("Failed to write {dest:?}: {err}");
         }
     }
+}
+
+fn build_macos_tray_icons() {
+    if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() != Some("macos") {
+        return;
+    }
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR missing"));
+    for (source, output_name, use_dark_strokes) in MACOS_TRAY_ICONS {
+        render_macos_tray_icon(Path::new(source), &out_dir.join(output_name), *use_dark_strokes);
+    }
+}
+
+fn render_macos_tray_icon(source: &Path, dest: &Path, use_dark_strokes: bool) {
+    let svg = fs::read_to_string(source)
+        .unwrap_or_else(|err| panic!("Failed to read {source:?}: {err}"));
+    let svg = if use_dark_strokes {
+        svg.replace("stroke:#000000", "stroke:#ffffff")
+    } else {
+        svg
+    };
+
+    let options = usvg::Options::default();
+    let tree = usvg::Tree::from_str(&svg, &options)
+        .unwrap_or_else(|err| panic!("Failed to parse tray icon SVG {source:?}: {err}"));
+    let size = tree.size().to_int_size();
+    let (width, height) = size.dimensions();
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)
+        .unwrap_or_else(|| panic!("Failed to allocate tray icon pixmap for {source:?}"));
+    let mut pixmap_mut = pixmap.as_mut();
+    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap_mut);
+
+    let image = RgbaImage::from_raw(width, height, pixmap.take_demultiplied())
+        .unwrap_or_else(|| panic!("Failed to build tray icon image buffer for {source:?}"));
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|err| panic!("Failed to create {parent:?}: {err}"));
+    }
+    image
+        .save(dest)
+        .unwrap_or_else(|err| panic!("Failed to write {dest:?}: {err}"));
 }
