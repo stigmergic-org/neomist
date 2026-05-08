@@ -130,7 +130,7 @@ async function addIpfsRoot({ kuboRpcUrl, onlyHash, pin, logger }) {
 
   const args = [
     'add',
-    '--quiet',
+    '--quieter',
     '--recursive',
     '--cid-version=1',
     '--raw-leaves',
