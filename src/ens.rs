@@ -11,6 +11,7 @@ use axum::http::{Request, Response, StatusCode, header::HOST};
 use eyre::{Report, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use url::form_urlencoded;
@@ -77,6 +78,9 @@ const OFFLINE_LOOKUP_PATTERNS: &[&str] = &[
     "timeout",
 ];
 const HELIOS_SYNC_LOOKUP_PATTERNS: &[&str] = &["out of sync", "seconds behind"];
+const HELIOS_MAX_RETRYABLE_SYNC_LAG_SECS: u64 = 300;
+const HELIOS_RESTART_SYNC_LAG_SECS: u64 = 3600;
+const HELIOS_RESTART_WAIT_TIMEOUT_SECS: u64 = 15;
 const LOOKUP_RETRY_DELAYS_MS: &[u64] = &[300, 1000];
 const ENSIP10_INTERFACE_ID: [u8; 4] = 0x9061b923_u32.to_be_bytes();
 const MAX_CCIP_REDIRECTS: usize = 4;
@@ -190,86 +194,73 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 
     let (contenthash, contenthash_metadata, refresh_cache) =
         match resolve_contenthash_record(state, ens_name).await {
-            Ok(ContenthashLookup {
-                record: ContenthashRecord::Supported(contenthash),
-                resolution,
-            }) => {
-                let metadata = ResolvedContenthashMetadata::new(contenthash.clone(), resolution);
-                (contenthash, Some(metadata), true)
-            }
-            Ok(ContenthashLookup {
-                record: ContenthashRecord::Missing,
-                ..
-            }) => {
-            return site_error::build_site_error_response(
-                StatusCode::NOT_FOUND,
-                wants_html_error_page,
-                "No contenthash record",
-                "This domain does not have an IPFS or IPNS contenthash record, so NeoMist has no site content to load.",
-                Some("Resolver returned no contenthash for this name."),
-                ens_name,
-                path,
-            );
-            }
-            Ok(ContenthashLookup {
-                record: ContenthashRecord::UnsupportedCodec(codec),
-                ..
-            }) => {
-            let detail = format!(
-                "Unsupported contenthash codec 0x{codec:x}. NeoMist currently supports only IPFS and IPNS contenthash records."
-            );
-            return site_error::build_site_error_response(
-                StatusCode::BAD_GATEWAY,
-                wants_html_error_page,
-                "Unsupported contenthash",
-                "This domain uses unsupported contenthash protocol. NeoMist supports only IPFS and IPNS contenthash records.",
-                Some(&detail),
-                ens_name,
-                path,
-            );
-            }
-            Ok(ContenthashLookup {
-                record: ContenthashRecord::Invalid(reason),
-                ..
-            }) => {
-            let detail = format!("Contenthash record is malformed: {reason}");
-            return site_error::build_site_error_response(
-                StatusCode::BAD_GATEWAY,
-                wants_html_error_page,
-                "Invalid contenthash record",
-                "This domain has contenthash record, but resolver returned malformed data.",
-                Some(&detail),
-                ens_name,
-                path,
-            );
-            }
+            Ok(lookup) => match contenthash_lookup_outcome(lookup, ens_name, path, wants_html_error_page) {
+                Ok(outcome) => outcome,
+                Err(response) => return response,
+            },
             Err(err) => {
-                if is_offline_lookup_error(&err) {
-                    match latest_cached_cid(state, ens_name).await {
-                        Ok(Some(cid)) => {
+                if is_cached_contenthash_fallback_lookup_error(&err) {
+                    match latest_cached_contenthash(state, ens_name).await {
+                        Ok(Some(contenthash)) => {
                             warn!(
-                                "ENS lookup failed for {ens_name} while offline, using cached CID {cid}: {err:?}"
+                                "ENS lookup failed for {ens_name} while ENS backend was unavailable, using cached target {}: {err:?}",
+                                contenthash.target()
                             );
-                            (ResolvedContenthash::Ipfs(cid), None, false)
+                            (contenthash, None, false)
                         }
                         Ok(None) => {
                             warn!(
-                                "ENS lookup failed for {ens_name} while offline and no cached record is available: {err:?}"
+                                "ENS lookup failed for {ens_name} while ENS backend was unavailable and no cached record is available: {err:?}"
                             );
-                            let detail = format!("Failed to resolve contenthash while offline: {err:#}");
-                            return ens_lookup_failed_response(
-                                ens_name,
-                                path,
-                                wants_html_error_page,
-                                Some(&detail),
-                            );
+                            let retry_outcome =
+                                match wait_for_helios_recovery_and_retry_contenthash(state, ens_name, &err)
+                                    .await
+                                {
+                                Ok(Some(lookup)) => {
+                                    match contenthash_lookup_outcome(
+                                        lookup,
+                                        ens_name,
+                                        path,
+                                        wants_html_error_page,
+                                    ) {
+                                        Ok(outcome) => Some(outcome),
+                                        Err(response) => return response,
+                                    }
+                                }
+                                Ok(None) => None,
+                                Err(retry_err) => {
+                                    warn!(
+                                        "ENS lookup retry after Helios recovery failed for {ens_name}: {retry_err:?}"
+                                    );
+                                    let detail = format!(
+                                        "Failed to resolve contenthash via ENS backend: {err:#}. Retry after Helios recovery failed: {retry_err:#}"
+                                    );
+                                    return ens_lookup_failed_response(
+                                        ens_name,
+                                        path,
+                                        wants_html_error_page,
+                                        Some(&detail),
+                                    );
+                                }
+                            };
+                            if let Some(outcome) = retry_outcome {
+                                outcome
+                            } else {
+                                let detail = format!("Failed to resolve contenthash via ENS backend: {err:#}");
+                                return ens_lookup_failed_response(
+                                    ens_name,
+                                    path,
+                                    wants_html_error_page,
+                                    Some(&detail),
+                                );
+                            }
                         }
                         Err(cache_err) => {
                             warn!(
                                 "ENS lookup failed for {ens_name} and cached fallback lookup failed: {err:?}; cache error: {cache_err:?}"
                             );
                             let detail = format!(
-                                "Failed to resolve contenthash while offline: {err:#}. Cached fallback also failed: {cache_err:#}"
+                                "Failed to resolve contenthash via ENS backend: {err:#}. Cached fallback also failed: {cache_err:#}"
                             );
                             return ens_lookup_failed_response(
                                 ens_name,
@@ -616,6 +607,14 @@ pub async fn latest_cached_cid(state: &AppState, site: &str) -> Result<Option<St
         .map(|(_, cid)| cid))
 }
 
+async fn latest_cached_contenthash(state: &AppState, site: &str) -> Result<Option<ResolvedContenthash>> {
+    if let Some(metadata) = crate::cache::read_contenthash_metadata(state, site).await? {
+        return Ok(Some(metadata.contenthash));
+    }
+
+    Ok(latest_cached_cid(state, site).await?.map(ResolvedContenthash::Ipfs))
+}
+
 async fn mfs_stat_hash(state: &AppState, path: &str) -> Result<String> {
     let url = format!(
         "{}/api/v0/files/stat?arg={}",
@@ -699,6 +698,70 @@ fn ens_lookup_failed_response(
     )
 }
 
+fn contenthash_lookup_outcome(
+    lookup: ContenthashLookup,
+    ens_name: &str,
+    path: &str,
+    wants_html_error_page: bool,
+) -> std::result::Result<
+    (ResolvedContenthash, Option<ResolvedContenthashMetadata>, bool),
+    Response<Body>,
+> {
+    match lookup {
+        ContenthashLookup {
+            record: ContenthashRecord::Supported(contenthash),
+            resolution,
+        } => {
+            let metadata = ResolvedContenthashMetadata::new(contenthash.clone(), resolution);
+            Ok((contenthash, Some(metadata), true))
+        }
+        ContenthashLookup {
+            record: ContenthashRecord::Missing,
+            ..
+        } => Err(site_error::build_site_error_response(
+            StatusCode::NOT_FOUND,
+            wants_html_error_page,
+            "No contenthash record",
+            "This domain does not have an IPFS or IPNS contenthash record, so NeoMist has no site content to load.",
+            Some("Resolver returned no contenthash for this name."),
+            ens_name,
+            path,
+        )),
+        ContenthashLookup {
+            record: ContenthashRecord::UnsupportedCodec(codec),
+            ..
+        } => {
+            let detail = format!(
+                "Unsupported contenthash codec 0x{codec:x}. NeoMist currently supports only IPFS and IPNS contenthash records."
+            );
+            Err(site_error::build_site_error_response(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Unsupported contenthash",
+                "This domain uses unsupported contenthash protocol. NeoMist supports only IPFS and IPNS contenthash records.",
+                Some(&detail),
+                ens_name,
+                path,
+            ))
+        }
+        ContenthashLookup {
+            record: ContenthashRecord::Invalid(reason),
+            ..
+        } => {
+            let detail = format!("Contenthash record is malformed: {reason}");
+            Err(site_error::build_site_error_response(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Invalid contenthash record",
+                "This domain has contenthash record, but resolver returned malformed data.",
+                Some(&detail),
+                ens_name,
+                path,
+            ))
+        }
+    }
+}
+
 fn ens_gateway_error_copy(status: StatusCode) -> (&'static str, &'static str) {
     if status == StatusCode::NOT_FOUND {
         (
@@ -723,9 +786,18 @@ fn is_offline_lookup_error(err: &Report) -> bool {
         .any(|cause| looks_like_offline_lookup_message(&cause.to_string()))
 }
 
+fn is_cached_contenthash_fallback_lookup_error(err: &Report) -> bool {
+    is_offline_lookup_error(err) || is_helios_sync_lookup_error(err)
+}
+
 fn is_retryable_lookup_error(err: &Report) -> bool {
     err.chain()
         .any(|cause| looks_like_retryable_lookup_message(&cause.to_string()))
+}
+
+fn is_helios_sync_lookup_error(err: &Report) -> bool {
+    err.chain()
+        .any(|cause| looks_like_helios_sync_lookup_message(&cause.to_string()))
 }
 
 fn looks_like_offline_lookup_message(message: &str) -> bool {
@@ -733,11 +805,110 @@ fn looks_like_offline_lookup_message(message: &str) -> bool {
 }
 
 fn looks_like_retryable_lookup_message(message: &str) -> bool {
-    looks_like_offline_lookup_message(message) || looks_like_helios_sync_lookup_message(message)
+    looks_like_offline_lookup_message(message)
+        || helios_sync_lag_seconds(message)
+            .map(|lag_secs| lag_secs <= HELIOS_MAX_RETRYABLE_SYNC_LAG_SECS)
+            .unwrap_or_else(|| looks_like_helios_sync_lookup_message(message))
 }
 
 fn looks_like_helios_sync_lookup_message(message: &str) -> bool {
     message_matches_patterns(message, HELIOS_SYNC_LOOKUP_PATTERNS)
+}
+
+fn helios_sync_lag_seconds(message: &str) -> Option<u64> {
+    let message = message.to_ascii_lowercase();
+    let prefix = message.split_once("seconds behind")?.0;
+    prefix
+        .rsplit(|ch: char| !ch.is_ascii_digit())
+        .find(|segment| !segment.is_empty())?
+        .parse()
+        .ok()
+}
+
+fn lookup_error_helios_sync_lag_seconds(err: &Report) -> Option<u64> {
+    err.chain()
+        .find_map(|cause| helios_sync_lag_seconds(&cause.to_string()))
+}
+
+pub(crate) fn maybe_schedule_helios_restart_for_error(
+    state: &AppState,
+    host: &str,
+    lookup_kind: &str,
+    err: &Report,
+) {
+    if !state.helios_has_synced.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let waiting_for_restart = lookup_error_helios_sync_lag_seconds(err)
+        .map(|lag_secs| lag_secs >= HELIOS_RESTART_SYNC_LAG_SECS)
+        .unwrap_or(false)
+        || is_offline_lookup_error(err);
+    if !waiting_for_restart {
+        return;
+    }
+
+    let Some(helios_runtime) = state.helios_runtime.as_ref() else {
+        return;
+    };
+
+    helios_runtime.maybe_schedule_restart(
+        state.tray_state.clone(),
+        host,
+        lookup_kind,
+        lookup_error_helios_sync_lag_seconds(err).unwrap_or(0),
+    );
+}
+
+async fn wait_for_helios_recovery_and_retry_contenthash(
+    state: &AppState,
+    ens_name: &str,
+    err: &Report,
+) -> Result<Option<ContenthashLookup>> {
+    let Some(helios_runtime) = state.helios_runtime.as_ref() else {
+        return Ok(None);
+    };
+
+    let waiting_for_initial_sync = !state.helios_has_synced.load(Ordering::Relaxed)
+        && !helios_runtime.is_current_client_synced();
+    let waiting_for_restart = (state.helios_has_synced.load(Ordering::Relaxed)
+        && is_offline_lookup_error(err))
+        || lookup_error_helios_sync_lag_seconds(err)
+        .map(|lag_secs| lag_secs >= HELIOS_RESTART_SYNC_LAG_SECS)
+        .unwrap_or(false);
+
+    if !waiting_for_initial_sync && !waiting_for_restart {
+        return Ok(None);
+    }
+
+    if helios_runtime.is_current_client_synced() {
+        warn!("Helios already recovered for {ens_name}; retrying ENS contenthash lookup");
+        return resolve_contenthash_record(state, ens_name).await.map(Some);
+    }
+
+    let sync_epoch = helios_runtime.current_sync_epoch();
+    let wait_reason = if waiting_for_initial_sync {
+        "initial Helios sync"
+    } else {
+        "Helios restart"
+    };
+
+    warn!(
+        "ENS lookup failed for {ens_name} with no cached record; waiting up to {HELIOS_RESTART_WAIT_TIMEOUT_SECS}s for {wait_reason}"
+    );
+
+    if !helios_runtime
+        .wait_for_sync_after(sync_epoch, Duration::from_secs(HELIOS_RESTART_WAIT_TIMEOUT_SECS))
+        .await
+    {
+        warn!(
+            "Helios did not recover within {HELIOS_RESTART_WAIT_TIMEOUT_SECS}s for {ens_name}"
+        );
+        return Ok(None);
+    }
+
+    warn!("Helios recovered for {ens_name}; retrying ENS contenthash lookup");
+    resolve_contenthash_record(state, ens_name).await.map(Some)
 }
 
 fn message_matches_patterns(message: &str, patterns: &[&str]) -> bool {
@@ -820,14 +991,20 @@ fn inspect_contenthash(bytes: &AlloyBytes) -> ContenthashRecord {
 }
 
 async fn resolve_contenthash_record(state: &AppState, host: &str) -> Result<ContenthashLookup> {
-    with_lookup_retries(host, "contenthash", || async {
+    let result = with_lookup_retries(host, "contenthash", || async {
         if host.ends_with(".wei") {
             resolve_wei_contenthash_record_once(state.ens_provider.as_ref(), host).await
         } else {
             resolve_ens_contenthash_record_once(state, host).await
         }
     })
-    .await
+    .await;
+
+    if let Err(err) = &result {
+        maybe_schedule_helios_restart_for_error(state, host, "contenthash", err);
+    }
+
+    result
 }
 
 fn decode_varint(bytes: &AlloyBytes) -> Option<(u64, usize)> {
@@ -880,14 +1057,20 @@ pub async fn resolve_contenthash(
 }
 
 pub async fn resolve_address(state: &AppState, host: &str) -> Result<Option<Address>> {
-    with_lookup_retries(host, "address", || async {
+    let result = with_lookup_retries(host, "address", || async {
         if host.ends_with(".wei") {
             resolve_wei_address_once(state.ens_provider.as_ref(), host).await
         } else {
             resolve_ens_address_once(state, host).await
         }
     })
-    .await
+    .await;
+
+    if let Err(err) = &result {
+        maybe_schedule_helios_restart_for_error(state, host, "address", err);
+    }
+
+    result
 }
 
 async fn resolve_ens_contenthash_record_once(state: &AppState, ens_name: &str) -> Result<ContenthashLookup> {
@@ -1312,7 +1495,7 @@ fn wei_namehash(name: &str) -> B256 {
 mod tests {
     use super::{
         ContenthashRecord, IPFS_CODEC, IPNS_CODEC, ResolvedContenthash, decode_contenthash,
-        OffchainLookup, decode_gateway_response_body, dns_encode_name,
+        OffchainLookup, decode_gateway_response_body, dns_encode_name, helios_sync_lag_seconds,
         extract_revert_data_from_message, inspect_contenthash,
         looks_like_offline_lookup_message, looks_like_retryable_lookup_message,
         with_lookup_retries_using_delays,
@@ -1339,8 +1522,25 @@ mod tests {
             "error sending request for url (https://rpc.example): Network is unreachable (os error 51)"
         ));
         assert!(looks_like_retryable_lookup_message(
+            "server returned an error response: error code 1: out of sync: 120 seconds behind"
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_badly_stale_helios_lookup_failures() {
+        assert!(!looks_like_retryable_lookup_message(
             "server returned an error response: error code 1: out of sync: 1774266794 seconds behind"
         ));
+    }
+
+    #[test]
+    fn extracts_helios_sync_lag_seconds() {
+        assert_eq!(
+            helios_sync_lag_seconds(
+                "server returned an error response: error code 1: out of sync: 1774266794 seconds behind"
+            ),
+            Some(1774266794)
+        );
     }
 
     #[test]
@@ -1414,6 +1614,29 @@ mod tests {
 
         assert_eq!(attempts, 1);
         assert!(format!("{err:#}").contains("execution reverted"));
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_badly_stale_helios_lookup_failure() {
+        let mut attempts = 0usize;
+        let err = with_lookup_retries_using_delays(
+            "ens.eth",
+            "contenthash",
+            &[0, 0],
+            || {
+                attempts += 1;
+                async move {
+                    Err(eyre::eyre!(
+                        "server returned an error response: error code 1: out of sync: 1774266794 seconds behind"
+                    ))
+                }
+            },
+        )
+        .await
+        .expect_err("badly stale Helios error should bubble immediately");
+
+        assert_eq!(attempts, 1);
+        assert!(format!("{err:#}").contains("out of sync"));
     }
 
     #[test]

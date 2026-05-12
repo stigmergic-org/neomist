@@ -4,12 +4,23 @@ use axum::response::Response;
 use axum::routing::{any, post};
 use hyper::body::Bytes;
 use reqwest::StatusCode;
+use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::state::AppState;
+use crate::config::AppConfig;
 
-pub async fn run_internal_proxy(state: AppState) -> eyre::Result<u16> {
+#[derive(Clone)]
+struct RpcProxyState {
+    config: Arc<RwLock<AppConfig>>,
+    http_client: reqwest::Client,
+}
+
+pub async fn run_internal_proxy(
+    config: Arc<RwLock<AppConfig>>,
+    http_client: reqwest::Client,
+) -> eyre::Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
@@ -18,7 +29,10 @@ pub async fn run_internal_proxy(state: AppState) -> eyre::Result<u16> {
         .route("/execution/*path", post(execution_proxy_handler))
         .route("/consensus", any(consensus_proxy_handler))
         .route("/consensus/*path", any(consensus_proxy_handler))
-        .with_state(state);
+        .with_state(RpcProxyState {
+            config,
+            http_client,
+        });
 
     info!("Starting internal RPC proxy on 127.0.0.1:{port}");
     tokio::spawn(async move {
@@ -30,7 +44,7 @@ pub async fn run_internal_proxy(state: AppState) -> eyre::Result<u16> {
     Ok(port)
 }
 
-async fn execution_proxy_handler(State(state): State<AppState>, body: Bytes) -> Response {
+async fn execution_proxy_handler(State(state): State<RpcProxyState>, body: Bytes) -> Response {
     let rpcs = {
         let config = state.config.read().await;
         config.execution_rpcs.clone()
@@ -77,7 +91,7 @@ async fn execution_proxy_handler(State(state): State<AppState>, body: Bytes) -> 
         .unwrap()
 }
 
-async fn consensus_proxy_handler(State(state): State<AppState>, req: Request) -> Response {
+async fn consensus_proxy_handler(State(state): State<RpcProxyState>, req: Request) -> Response {
     let rpcs = {
         let config = state.config.read().await;
         config.consensus_rpcs.clone()

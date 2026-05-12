@@ -153,16 +153,24 @@ pub async fn proxy_request(state: &AppState, request: Request<Body>) -> Response
 
     match render_web3_content(state.ens_provider.as_ref(), contract, &parsed, parts.method == Method::HEAD).await {
         Ok(response) => response,
-        Err(err) => text_or_site_error(
-            StatusCode::BAD_GATEWAY,
-            wants_html_error_page,
-            "Web3 content load failed",
-            "NeoMist resolved this web3 target but could not load contract response.",
-            Some(&format!("{err:#}")),
-            local_host,
-            &request_path,
-            None,
-        ),
+        Err(err) => {
+            ens::maybe_schedule_helios_restart_for_error(
+                state,
+                &parsed.authority.host,
+                "web3 content",
+                &err,
+            );
+            text_or_site_error(
+                StatusCode::BAD_GATEWAY,
+                wants_html_error_page,
+                "Web3 content load failed",
+                "NeoMist resolved this web3 target but could not load contract response.",
+                Some(&format!("{err:#}")),
+                local_host,
+                &request_path,
+                None,
+            )
+        }
     }
 }
 
