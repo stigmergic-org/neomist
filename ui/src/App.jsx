@@ -1112,7 +1112,7 @@ function useAppsCatalogBasePath() {
 
     const load = async () => {
       try {
-        const response = await fetch(`${APPS_NEOMIST_ORIGIN}/`);
+        const response = await fetch(`${APPS_NEOMIST_ORIGIN}/`, { cache: 'no-store' });
         if (!response.ok) {
           throw new Error('Failed to resolve apps.neomist.eth root CID');
         }
