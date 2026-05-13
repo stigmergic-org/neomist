@@ -5,6 +5,12 @@ use axum::http::{
 };
 use url::form_urlencoded;
 
+const SETTINGS_URL: &str = "https://neomist.localhost/settings";
+const EXECUTION_RPC_FAILURE_PATTERNS: &[&str] = &[
+    "all configured execution rpcs failed",
+    "no execution rpcs configured",
+];
+
 pub(crate) fn prefers_html_error_page(headers: &HeaderMap) -> bool {
     let wants_document = headers
         .get("sec-fetch-dest")
@@ -104,6 +110,7 @@ fn build_html_error_response(
             )
         })
         .unwrap_or_default();
+    let show_rpc_settings_hint = should_show_execution_rpc_settings_hint(detail);
     let detail_block = detail
         .filter(|value| !value.trim().is_empty())
         .map(|value| {
@@ -114,6 +121,25 @@ fn build_html_error_response(
           <p class="meta-copy">{}</p>
         </article>"#,
                 escape_html(value.trim())
+            )
+        })
+        .unwrap_or_default();
+    let rpc_settings_block = show_rpc_settings_hint
+        .then(|| {
+            format!(
+                r#"
+        <article class="vapor-subtle-panel meta-card detail-card">
+          <p class="meta-label">Possible fix</p>
+          <p class="meta-copy">Current Ethereum execution RPC endpoints did not respond. You can add custom execution RPC endpoints in NeoMist settings.</p>
+        </article>"#
+            )
+        })
+        .unwrap_or_default();
+    let rpc_settings_action = show_rpc_settings_hint
+        .then(|| {
+            format!(
+                r#"<a class="vapor-button-secondary" href="{}">Open RPC settings</a>"#,
+                escape_html(SETTINGS_URL)
             )
         })
         .unwrap_or_default();
@@ -521,11 +547,13 @@ fn build_html_error_response(
           </article>
 
           {detail_block}
+          {rpc_settings_block}
         </section>
 
         <div class="actions">
           <button class="vapor-button-secondary" type="button" onclick="window.location.reload()">Retry this page</button>
           {ens_app_action}
+          {rpc_settings_action}
           <a class="vapor-button-primary" href="https://neomist.localhost">Open NeoMist dashboard</a>
         </div>
       </section>
@@ -539,6 +567,8 @@ fn build_html_error_response(
         request_target = escape_html(&request_target),
         ens_app_action = ens_app_action,
         detail_block = detail_block,
+        rpc_settings_block = rpc_settings_block,
+        rpc_settings_action = rpc_settings_action,
     );
 
     Response::builder()
@@ -563,6 +593,10 @@ fn build_text_error_response(
         body.push_str("\nDetail: ");
         body.push_str(detail.trim());
     }
+    if should_show_execution_rpc_settings_hint(detail) {
+        body.push_str("\nHint: Configure custom Ethereum execution RPC endpoints in NeoMist settings: ");
+        body.push_str(SETTINGS_URL);
+    }
 
     Response::builder()
         .status(status)
@@ -580,6 +614,16 @@ fn ens_app_url(host: &str) -> Option<String> {
 
     let encoded: String = form_urlencoded::byte_serialize(normalized.as_bytes()).collect();
     Some(format!("https://ens.eth/profile/?name={encoded}"))
+}
+
+fn should_show_execution_rpc_settings_hint(detail: Option<&str>) -> bool {
+    let Some(detail) = detail else {
+        return false;
+    };
+    let detail = detail.to_ascii_lowercase();
+    EXECUTION_RPC_FAILURE_PATTERNS
+        .iter()
+        .any(|pattern| detail.contains(pattern))
 }
 
 fn escape_html(value: &str) -> String {
@@ -709,7 +753,7 @@ fn truncate_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_site_error_response, ens_app_url, error_body_looks_like_html,
+        SETTINGS_URL, build_site_error_response, ens_app_url, error_body_looks_like_html,
         prefers_html_error_page, summarize_error_detail,
     };
     use axum::body::to_bytes;
@@ -800,6 +844,43 @@ mod tests {
         assert!(body.contains("Open in ENS app"));
         assert!(body.contains("https://ens.eth/profile/?name=example.eth"));
         assert!(body.contains("Open NeoMist dashboard"));
+    }
+
+    #[tokio::test]
+    async fn adds_rpc_settings_hint_for_execution_rpc_failures() {
+        let response = build_site_error_response(
+            StatusCode::BAD_GATEWAY,
+            true,
+            "Name lookup failed",
+            "NeoMist could not resolve this domain.",
+            Some("server returned an error response: error code 1: evm error: \"HTTP error 502 with body: All configured execution RPCs failed\""),
+            "example.eth",
+            "/",
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Open RPC settings"));
+        assert!(body.contains(SETTINGS_URL));
+        assert!(body.contains("custom execution RPC endpoints"));
+    }
+
+    #[tokio::test]
+    async fn adds_text_hint_for_execution_rpc_failures() {
+        let response = build_site_error_response(
+            StatusCode::BAD_GATEWAY,
+            false,
+            "Name lookup failed",
+            "NeoMist could not resolve this domain.",
+            Some("HTTP error 502 with body: All configured execution RPCs failed"),
+            "example.eth",
+            "/",
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Hint: Configure custom Ethereum execution RPC endpoints"));
+        assert!(body.contains(SETTINGS_URL));
     }
 
     #[tokio::test]
