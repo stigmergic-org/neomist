@@ -4,9 +4,10 @@ import { DEFAULTS } from './config.mjs';
 import { openStore } from './db.mjs';
 import { exportIpfsTree } from './export-ipfs-tree.mjs';
 import { publishIpfsRootToEns } from './publish-ens.mjs';
+import { reprobeNames } from './reprobe.mjs';
 import { syncName, syncNames } from './sync-names.mjs';
 
-const BOOLEAN_FLAGS = new Set(['details', 'dry-run', 'force', 'full-backfill', 'no-pin', 'retry-failed', 'skip-probe']);
+const BOOLEAN_FLAGS = new Set(['details', 'dry-run', 'force', 'full-backfill', 'no-pin', 'only-missing-icons', 'retry-failed', 'skip-probe']);
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
@@ -43,6 +44,9 @@ async function main() {
         break;
       case 'sync-name':
         await runSyncName(store, args);
+        break;
+      case 'reprobe-names':
+        await runReprobeNames(store, parseFlags(args));
         break;
       case 'analyze-name':
       case 'analyse-name':
@@ -104,6 +108,19 @@ async function runSyncName(store, args) {
     timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.timeoutMs),
     maxBytes: parseIntegerFlag(flags['max-bytes'], DEFAULTS.maxBytes),
     skipProbe: Boolean(flags['skip-probe']),
+  });
+  printJson(summary);
+}
+
+async function runReprobeNames(store, flags) {
+  const summary = await reprobeNames(store, {
+    limit: flags.limit == null ? null : parseIntegerFlag(flags.limit, null),
+    onlyMissingIcons: Boolean(flags['only-missing-icons']),
+    kuboRpcUrl: flags['kubo-rpc-url'] ?? DEFAULTS.kuboRpcUrl,
+    probeConcurrency: parseIntegerFlag(flags['probe-concurrency'], DEFAULTS.probeConcurrency),
+    timeoutMs: parseIntegerFlag(flags['timeout-ms'], DEFAULTS.timeoutMs),
+    maxBytes: parseIntegerFlag(flags['max-bytes'], DEFAULTS.maxBytes),
+    logger: logInfo,
   });
   printJson(summary);
 }
@@ -450,6 +467,9 @@ function printCommandHelp(command) {
     case 'sync-name':
       printSyncNameHelp();
       return;
+    case 'reprobe-names':
+      printReprobeNamesHelp();
+      return;
     case 'analyze-name':
     case 'analyse-name':
       printAnalyzeNameHelp();
@@ -489,6 +509,7 @@ function printGeneralHelp() {
   process.stdout.write(`Commands:\n`);
   process.stdout.write(`  sync-names            head sync recent ENSNode events, then backfill older ones, store current names, probe via Kubo RPC\n`);
   process.stdout.write(`  sync-name             sync one ENS name or node, then probe via Kubo RPC\n`);
+  process.stdout.write(`  reprobe-names         refresh Kubo probe rows for stored names\n`);
   process.stdout.write(`  analyze-name          analyze one synced name through WAC/OpenCode\n`);
   process.stdout.write(`  analyze-names         analyze synced names with unattempted current CID\n`);
   process.stdout.write(`  export-ipfs           export successful current names into ipfs-root\n`);
@@ -550,6 +571,19 @@ function printSyncNamesHelp() {
   process.stdout.write(`  --kubo-rpc-url URL        Kubo RPC API URL or multiaddr (default ${DEFAULTS.kuboRpcUrl})\n`);
   process.stdout.write(`  --head-replay-blocks N    recent block replay window for head sync (default ${DEFAULTS.headReplayBlocks})\n`);
   process.stdout.write(`  --probe-concurrency N     concurrent Kubo probes (default ${DEFAULTS.probeConcurrency})\n`);
+  process.stdout.write(`  --timeout-ms N            probe timeout (default ${DEFAULTS.timeoutMs})\n`);
+  process.stdout.write(`  --max-bytes N             max probe body bytes (default ${DEFAULTS.maxBytes})\n`);
+  process.stdout.write(`  -h, --help                show this help\n`);
+}
+
+function printReprobeNamesHelp() {
+  process.stdout.write(`Usage: node src/cli.mjs reprobe-names [options]\n\n`);
+  process.stdout.write(`Re-run Kubo probes for current stored names and insert fresh probe rows.\n\n`);
+  process.stdout.write(`Options:\n`);
+  process.stdout.write(`  --only-missing-icons      only probe names whose latest probe has no icon URL\n`);
+  process.stdout.write(`  --limit N                 max names to reprobe (default all matching names)\n`);
+  process.stdout.write(`  --probe-concurrency N     concurrent Kubo probes (default ${DEFAULTS.probeConcurrency})\n`);
+  process.stdout.write(`  --kubo-rpc-url URL        Kubo RPC API URL or multiaddr (default ${DEFAULTS.kuboRpcUrl})\n`);
   process.stdout.write(`  --timeout-ms N            probe timeout (default ${DEFAULTS.timeoutMs})\n`);
   process.stdout.write(`  --max-bytes N             max probe body bytes (default ${DEFAULTS.maxBytes})\n`);
   process.stdout.write(`  -h, --help                show this help\n`);

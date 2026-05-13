@@ -229,6 +229,7 @@ Useful commands:
 ```bash
 npm run sync-name -- ethdevnews.eth
 npm run sync-names -- --limit 200
+npm run reprobe-names -- --only-missing-icons
 npm run analyze-name -- ethdevnews.eth
 npm run analyze-names -- --limit 50
 npm run export-ipfs
@@ -251,10 +252,11 @@ node src/cli.mjs <command> --help
 1. `sync-names` reads ENSNode `contenthashChangeds` events, replays a recent head window, and backfills older events with cursors stored in SQLite.
 2. For candidate domains, it hydrates current ENS domain data, decodes `contenthash`, keeps mainnet `.eth` names, excludes configured namespaces such as `base.eth` and `linea.eth`, and keeps only IPFS/IPNS roots.
 3. It probes current roots through Kubo RPC with `files.stat` and `cat`, looking for root files, `index.html`, `index.htm`, icons, and web manifests. Probe results store reachability, content type, title, icon, manifest, and fetch errors.
-4. `analyze-names` mounts reachable IPFS/IPNS roots through `wac --mount-ipfs`, runs OpenCode with `prompts/ipfs-app-analysis-system.md`, validates strict `analysis.json`, and stores category, quality, and light security review by root CID.
-5. `export-ipfs` rebuilds `ipfs-root/` from `state/index.sqlite`, writes sharded name records, CID-sharded analysis records, category pages, search docs, gram index, and metadata, then atomically replaces the old root.
-6. `publish-ens` hashes or adds `ipfs-root/` with `ipfs add --recursive --cid-version=1 --raw-leaves`, encodes the root CID as an IPFS ENS contenthash, checks the current resolver, and sends `setContenthash` when publishing is allowed.
-7. `daily` runs sync, analysis, export, and conditional publish in one command.
+4. `reprobe-names` can refresh probe rows for already-stored names, optionally limited to names whose latest probe has no icon URL.
+5. `analyze-names` mounts reachable IPFS/IPNS roots through `wac --mount-ipfs`, runs OpenCode with `prompts/ipfs-app-analysis-system.md`, validates strict `analysis.json`, and stores category, quality, and light security review by root CID.
+6. `export-ipfs` rebuilds `ipfs-root/` from `state/index.sqlite`, writes sharded name records, CID-sharded analysis records, category pages, search docs, gram index, and metadata, then atomically replaces the old root.
+7. `publish-ens` hashes or adds `ipfs-root/` with `ipfs add --recursive --cid-version=1 --raw-leaves`, encodes the root CID as an IPFS ENS contenthash, checks the current resolver, and sends `setContenthash` when publishing is allowed.
+8. `daily` runs sync, analysis, export, and conditional publish in one command.
 
 Publishing is skipped when the ENS contenthash is already current, gas price is at or above `--max-gas-price-mwei`, or the local publish marker is inside `--publish-cooldown-days`.
 

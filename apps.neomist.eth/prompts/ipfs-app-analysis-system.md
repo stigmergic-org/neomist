@@ -14,6 +14,14 @@ Workflow:
 6. Decide category, quality, and security from observed evidence. Prefer observed mounted content over analysis-context fields when they conflict.
 7. Write valid strict JSON to ./analysis.json. The chat response should only say whether analysis.json was written.
 
+Ownership and mirror checks:
+
+- Compare the ENS name from analysis-context with the identity claimed by the mounted content: title, h1/header, manifest name, RSS/feed title, author fields, canonical/home links, social image URLs, copyright text, and repeated brand/person names.
+- If content clearly presents itself as another person, project, or domain and the ENS name is unrelated, treat it as a third-party mirror or possible impersonation unless the mounted content explicitly says it is an unofficial fan site, archive, fork, or mirror.
+- Do not write summaries that imply the unrelated ENS name owns the claimed site. Say "an apparent mirror of ..." or "content claiming to be ..." when ownership is mismatched.
+- For deceptive or unexplained ownership mismatches, add a `brand_impersonation` security finding with the exact conflicting evidence, set security risk at least `medium`, set `safe_to_list` to `false`, and cap quality at `fair` even if the copied content is polished.
+- For explicit, non-deceptive fan/archive/mirror pages, do not flag impersonation solely because they reference another brand; mention the disclaimer in signals and score quality by usefulness and clarity.
+
 Evidence rules:
 
 - Every signals[] item should mention a mounted file path or analysis-context field.

@@ -3,6 +3,11 @@ import { create as createKuboRpcClient } from 'kubo-rpc-client';
 const TEXT_DECODER = new TextDecoder();
 const INDEX_FILENAMES = ['index.html', 'index.htm'];
 const MANIFEST_FILENAMES = ['manifest.webmanifest', 'manifest.json', 'site.webmanifest'];
+const COMMON_ICON_FILENAMES = ['favicon.svg', 'favicon.png', 'favicon.ico', 'apple-touch-icon.png', 'icon.svg', 'icon.png'];
+const MAX_DATA_ICON_URL_LENGTH = 16_384;
+const MAX_DATA_MANIFEST_URL_LENGTH = 65_536;
+const MAX_MANIFEST_BYTES = 65_536;
+const WEB_URL_PROTOCOLS = new Set(['http:', 'https:', 'ipfs:', 'ipns:']);
 const EXTENSION_CONTENT_TYPES = new Map([
   ['.css', 'text/css'],
   ['.gif', 'image/gif'],
@@ -62,13 +67,22 @@ export async function probeKuboName(nameRecord, { timeoutMs, maxBytes, kuboClien
   }
 
   const html = bodyData.buffer.length > 0 ? TEXT_DECODER.decode(bodyData.buffer) : '';
-  const htmlInfo = extractBasicHtmlInfo(html, contentUrl);
+  const title = extractHtmlTitle(html);
   const manifestUrl = await findManifestUrl({
     client,
     html,
     contentUrl,
     kuboPath,
     rootIsDirectory: stat.type === 'directory',
+    timeoutMs,
+  });
+  const iconUrl = await findIconUrl({
+    client,
+    html,
+    contentUrl,
+    kuboPath,
+    rootIsDirectory: stat.type === 'directory',
+    manifestUrl,
     timeoutMs,
   });
 
@@ -83,8 +97,8 @@ export async function probeKuboName(nameRecord, { timeoutMs, maxBytes, kuboClien
     locationHeader: null,
     xIpfsPath: bodyData.path ?? kuboPath,
     xIpfsRoots: [nameRecord.root_cid],
-    title: htmlInfo.title,
-    iconUrl: htmlInfo.iconUrl,
+    title,
+    iconUrl,
     manifestUrl,
     fetchError: null,
     bodyBytes: bodyData.bodyBytes,
@@ -307,21 +321,35 @@ function describeError(error) {
   return error.message;
 }
 
-function extractBasicHtmlInfo(html, baseUrl) {
-  if (!html) {
-    return {
-      title: null,
-      iconUrl: null,
-    };
+function extractHtmlTitle(html) {
+  return html ? firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i) : null;
+}
+
+async function findIconUrl({ client, html, contentUrl, kuboPath, rootIsDirectory, manifestUrl, timeoutMs }) {
+  const linkedIconUrl = extractBestLinkUrl(html, contentUrl, (relTokens) => relTokens.some((token) => token.includes('icon')), {
+    allowData: true,
+    maxDataUrlLength: MAX_DATA_ICON_URL_LENGTH,
+    dataMediaPattern: /^data:image\//iu,
+    scoreCandidate: scoreLinkIconCandidate,
+  });
+  if (linkedIconUrl) {
+    return linkedIconUrl;
   }
 
-  const title = firstMatch(html, /<title[^>]*>([\s\S]*?)<\/title>/i);
-  const iconUrl = extractLinkUrl(html, baseUrl, (relTokens) => relTokens.some((token) => token.includes('icon')));
-  return { title, iconUrl };
+  const manifestIconUrl = await findManifestIconUrl({ client, manifestUrl, timeoutMs });
+  if (manifestIconUrl) {
+    return manifestIconUrl;
+  }
+
+  return findCommonIconUrl({ client, contentUrl, kuboPath, rootIsDirectory, timeoutMs });
 }
 
 async function findManifestUrl({ client, html, contentUrl, kuboPath, rootIsDirectory, timeoutMs }) {
-  const linkedManifestUrl = extractLinkUrl(html, contentUrl, (relTokens) => relTokens.includes('manifest'));
+  const linkedManifestUrl = extractBestLinkUrl(html, contentUrl, (relTokens) => relTokens.includes('manifest'), {
+    allowData: true,
+    maxDataUrlLength: MAX_DATA_MANIFEST_URL_LENGTH,
+    dataMediaPattern: /^data:(?:application\/(?:manifest\+json|json)|text\/json)(?:[;,]|$)/iu,
+  });
   if (linkedManifestUrl) {
     return linkedManifestUrl;
   }
@@ -343,26 +371,257 @@ async function findManifestUrl({ client, html, contentUrl, kuboPath, rootIsDirec
   return null;
 }
 
-function extractLinkUrl(html, baseUrl, relPredicate) {
-  const matches = html.matchAll(/<link\b[^>]*>/gi);
-  for (const match of matches) {
-    const attrs = parseHtmlAttributes(match[0]);
-    const relTokens = String(attrs.rel ?? '').toLowerCase().split(/\s+/u).filter(Boolean);
-    const href = attrs.href ?? '';
-    if (!href || !relPredicate(relTokens)) {
+async function findManifestIconUrl({ client, manifestUrl, timeoutMs }) {
+  const manifest = await readManifestJson(client, manifestUrl, timeoutMs);
+  if (!manifest || !Array.isArray(manifest.icons)) {
+    return null;
+  }
+
+  const candidates = [];
+  for (const icon of manifest.icons) {
+    if (!icon || typeof icon !== 'object') {
       continue;
     }
+    const url = resolveMetadataUrl(icon.src, manifestUrl, {
+      allowData: true,
+      maxDataUrlLength: MAX_DATA_ICON_URL_LENGTH,
+      dataMediaPattern: /^data:image\//iu,
+    });
+    if (!url) {
+      continue;
+    }
+    candidates.push({
+      url,
+      score: scoreManifestIconCandidate(icon, url),
+      index: candidates.length,
+    });
+  }
 
+  return bestCandidateUrl(candidates);
+}
+
+async function findCommonIconUrl({ client, contentUrl, kuboPath, rootIsDirectory, timeoutMs }) {
+  if (!rootIsDirectory) {
+    return null;
+  }
+
+  for (const fileName of COMMON_ICON_FILENAMES) {
+    const iconPath = joinKuboPath(kuboPath, fileName);
     try {
-      const resolved = new URL(href, baseUrl);
-      if (['http:', 'https:', 'ipfs:', 'ipns:'].includes(resolved.protocol)) {
-        return resolved.toString();
-      }
+      await client.files.stat(iconPath, { timeout: timeoutMs });
+      return new URL(fileName, contentUrl).toString();
     } catch {
       continue;
     }
   }
+
   return null;
+}
+
+async function readManifestJson(client, manifestUrl, timeoutMs) {
+  if (!manifestUrl) {
+    return null;
+  }
+
+  try {
+    if (/^data:/iu.test(manifestUrl)) {
+      return parseJsonDataUrl(manifestUrl);
+    }
+
+    const kuboPath = kuboPathFromIpfsUrl(manifestUrl);
+    if (!kuboPath) {
+      return null;
+    }
+    const body = await readKuboFileWithCap(client, kuboPath, { timeoutMs, maxBytes: MAX_MANIFEST_BYTES });
+    return parseJsonText(TEXT_DECODER.decode(body.buffer));
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonDataUrl(dataUrl) {
+  if (dataUrl.length > MAX_DATA_MANIFEST_URL_LENGTH) {
+    return null;
+  }
+
+  const commaIndex = dataUrl.indexOf(',');
+  if (commaIndex === -1) {
+    return null;
+  }
+  const metadata = dataUrl.slice(0, commaIndex).toLowerCase();
+  const body = dataUrl.slice(commaIndex + 1);
+  const text = metadata.includes(';base64')
+    ? Buffer.from(body, 'base64').toString('utf8')
+    : decodeURIComponent(body);
+  return parseJsonText(text);
+}
+
+function parseJsonText(text) {
+  return JSON.parse(text.replace(/^\uFEFF/u, ''));
+}
+
+function kuboPathFromIpfsUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+
+  const protocol = url.protocol === 'ipns:' ? 'ipns' : (url.protocol === 'ipfs:' ? 'ipfs' : null);
+  if (!protocol) {
+    return null;
+  }
+
+  const root = url.hostname;
+  if (!root) {
+    return null;
+  }
+  const suffix = url.pathname === '/' ? '' : url.pathname;
+  return `/${protocol}/${root}${suffix}`;
+}
+
+function extractBestLinkUrl(html, baseUrl, relPredicate, options = {}) {
+  const candidates = [];
+  for (const tag of extractHtmlTags(html, 'link')) {
+    const attrs = parseHtmlAttributes(tag);
+    const relTokens = String(attrs.rel ?? '').toLowerCase().split(/\s+/u).filter(Boolean);
+    if (!attrs.href || !relPredicate(relTokens)) {
+      continue;
+    }
+
+    const url = resolveMetadataUrl(attrs.href, baseUrl, options);
+    if (!url) {
+      continue;
+    }
+
+    candidates.push({
+      url,
+      score: options.scoreCandidate?.({ attrs, relTokens, url }) ?? 0,
+      index: candidates.length,
+    });
+  }
+  return bestCandidateUrl(candidates);
+}
+
+function bestCandidateUrl(candidates) {
+  return candidates
+    .sort((left, right) => (right.score - left.score) || (left.index - right.index))[0]
+    ?.url ?? null;
+}
+
+function resolveMetadataUrl(rawUrl, baseUrl, options = {}) {
+  const value = decodeHtmlEntities(String(rawUrl ?? '')).trim();
+  if (!value) {
+    return null;
+  }
+
+  if (/^data:/iu.test(value)) {
+    if (!options.allowData || value.length > (options.maxDataUrlLength ?? 0)) {
+      return null;
+    }
+    if (options.dataMediaPattern && !options.dataMediaPattern.test(value)) {
+      return null;
+    }
+    return value;
+  }
+
+  try {
+    const resolved = new URL(value, baseUrl);
+    return WEB_URL_PROTOCOLS.has(resolved.protocol) ? resolved.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function scoreLinkIconCandidate({ attrs, relTokens, url }) {
+  let score = 0;
+  if (relTokens.includes('icon')) {
+    score += 80;
+  }
+  if (relTokens.some((token) => token === 'shortcut')) {
+    score += 4;
+  }
+  if (relTokens.some((token) => token.startsWith('apple-touch-icon'))) {
+    score += 45;
+  }
+  if (relTokens.includes('mask-icon')) {
+    score += 20;
+  }
+  return score + scoreIconSize(attrs.sizes) + scoreIconType(attrs.type, url);
+}
+
+function scoreManifestIconCandidate(icon, url) {
+  let score = scoreIconSize(icon.sizes) + scoreIconType(icon.type, url);
+  const purpose = String(icon.purpose ?? '').toLowerCase();
+  if (!purpose || purpose.split(/\s+/u).includes('any')) {
+    score += 8;
+  }
+  return score;
+}
+
+function scoreIconSize(sizes) {
+  const parsedSizes = String(sizes ?? '')
+    .toLowerCase()
+    .split(/\s+/u)
+    .map((size) => size.match(/^(\d+)x(\d+)$/u))
+    .filter(Boolean)
+    .map((match) => Math.max(Number(match[1]), Number(match[2])));
+  if (parsedSizes.length === 0) {
+    return 10;
+  }
+
+  const bestDistance = Math.min(...parsedSizes.map((size) => Math.abs(size - 32)));
+  return Math.max(0, 35 - bestDistance);
+}
+
+function scoreIconType(type, url) {
+  const value = `${type ?? ''} ${url}`.toLowerCase();
+  if (value.includes('image/svg')) {
+    return 16;
+  }
+  if (value.includes('image/png') || value.endsWith('.png')) {
+    return 12;
+  }
+  if (value.includes('image/x-icon') || value.includes('image/vnd.microsoft.icon') || value.endsWith('.ico')) {
+    return 10;
+  }
+  if (value.includes('image/webp') || value.endsWith('.webp')) {
+    return 8;
+  }
+  return 0;
+}
+
+function extractHtmlTags(html, tagName) {
+  if (!html) {
+    return [];
+  }
+
+  const tags = [];
+  const regex = new RegExp(`<${tagName}\\b`, 'giu');
+  let match;
+  while ((match = regex.exec(html))) {
+    let quote = null;
+    let index = regex.lastIndex;
+    for (; index < html.length; index += 1) {
+      const char = html[index];
+      if (quote) {
+        if (char === quote) {
+          quote = null;
+        }
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === '>') {
+        tags.push(html.slice(match.index, index + 1));
+        regex.lastIndex = index + 1;
+        break;
+      }
+    }
+    if (index >= html.length) {
+      break;
+    }
+  }
+  return tags;
 }
 
 function parseHtmlAttributes(tag) {
