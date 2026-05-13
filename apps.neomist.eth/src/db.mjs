@@ -230,6 +230,42 @@ function createStore(db) {
         [limit],
       );
     },
+    listNamesForReprobe(limit = null, options = {}) {
+      const where = ["names.contenthash_protocol IN ('ipfs', 'ipns')"];
+      const params = [];
+      if (options.onlyMissingIcons) {
+        where.push("(latest_probe.icon_url IS NULL OR latest_probe.icon_url = '')");
+      }
+      const limitClause = Number.isFinite(limit) ? 'LIMIT ?' : '';
+      if (Number.isFinite(limit)) {
+        params.push(limit);
+      }
+
+      return getAll(
+        db,
+        `SELECT names.node, names.name, names.parent_name, names.is_subdomain,
+                names.contenthash_hex, names.contenthash_protocol, names.root_cid,
+                names.source_block, names.source_tx_hash, names.source_event_id,
+                latest_probe.id AS latest_probe_id,
+                latest_probe.probed_at AS latest_probed_at,
+                latest_probe.success AS latest_probe_success,
+                latest_probe.icon_url AS latest_icon_url,
+                latest_probe.manifest_url AS latest_manifest_url
+         FROM names
+         LEFT JOIN probes AS latest_probe
+           ON latest_probe.id = (
+             SELECT id
+             FROM probes
+             WHERE node = names.node
+             ORDER BY probed_at DESC, id DESC
+             LIMIT 1
+           )
+         WHERE ${where.join(' AND ')}
+         ORDER BY lower(names.name) ASC
+         ${limitClause}`,
+        params,
+      );
+    },
     showName(identifier) {
       const row = identifier.startsWith('0x')
         ? getOne(db, 'SELECT * FROM names WHERE node = ?', [identifier])

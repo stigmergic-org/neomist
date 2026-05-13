@@ -6,6 +6,7 @@
     "cli": "node src/cli.mjs",
     "sync-names": "node src/cli.mjs sync-names",
     "sync-name": "node src/cli.mjs sync-name",
+    "reprobe-names": "node src/cli.mjs reprobe-names",
     "analyze-name": "node src/cli.mjs analyze-name",
     "analyze-names": "node src/cli.mjs analyze-names",
     "export-ipfs": "node src/cli.mjs export-ipfs",
