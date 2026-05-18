@@ -152,12 +152,21 @@ Run interactive release helper:
 ./release.sh
 ```
 
+Backfill GitHub release for existing tag:
+
+```bash
+./release.sh --backfill 0.6.1
+```
+
 - reads commits since latest `v*` tag and groups conventional commit subjects into release notes
 - suggests next semantic version, shows notes, and asks for confirmation
 - updates `Cargo.toml` and `Cargo.lock` when version changes are needed
 - creates `chore(release): v<version>` when version files change, tags `v<version>`, and pushes current branch plus tag to upstream remote
 - tag push triggers `Linux Packages`
 - on macOS, prompts for optional signed pkg build and notarization after push
+- waits for GitHub `Linux Packages` workflow, downloads `.deb` and `.AppImage` artifacts, then creates GitHub release with those plus optional macOS `.pkg`
+- `--backfill <version>` skips commit/tag push, pulls existing workflow artifacts for `v<version>`, and creates GitHub release for that tag
+- requires authenticated `gh` CLI and GitHub upstream remote
 - use `./release.sh --dry-run` to preview without changing git state
 
 Current Linux outputs:

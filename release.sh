@@ -6,6 +6,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CARGO_TOML="${ROOT_DIR}/Cargo.toml"
 CARGO_LOCK="${ROOT_DIR}/Cargo.lock"
 DRY_RUN=0
+BACKFILL_VERSION=''
+LINUX_WORKFLOW_FILE='linux-packages.yml'
+WORKFLOW_START_POLL_INTERVAL_SEC=5
+WORKFLOW_START_POLL_ATTEMPTS=60
 
 # shellcheck source=scripts/load-dotenv.sh
 if [[ -f "${ROOT_DIR}/scripts/load-dotenv.sh" ]]; then
@@ -24,6 +28,8 @@ test_notes=()
 chore_notes=()
 revert_notes=()
 other_notes=()
+release_assets=()
+local_macos_pkg_candidates=()
 conventional_commit_regex='^([[:alnum:]-]+)(\(([^)]*)\))?(!)?:[[:space:]](.+)$'
 
 usage() {
@@ -32,10 +38,12 @@ Create interactive NeoMist release.
 
 Usage:
   ./release.sh [--dry-run]
+  ./release.sh --backfill VERSION [--dry-run]
 
 Options:
-  --dry-run   Show proposed version, notes, commit, tag, and push targets without changing git state
-  -h, --help  Show help
+  --backfill VERSION  Create GitHub release for existing tag/workflow artifacts without new commit or tag push
+  --dry-run           Show proposed version, notes, commit, tag, and push targets without changing git state
+  -h, --help          Show help
 
 Flow:
   1. Read commits since latest v* tag
@@ -44,6 +52,14 @@ Flow:
   4. Update Cargo.toml and Cargo.lock when needed
   5. Commit release version when needed, create annotated tag, and push branch + tag to upstream remote
   6. Optionally build/sign/notarize macOS pkg on macOS host
+  7. Wait for Linux Packages workflow, download release artifacts, and create GitHub release with all assets
+
+Backfill flow:
+  1. Read commits for existing tag range
+  2. Show release notes for existing version
+  3. Download existing Linux Packages workflow artifacts from GitHub
+  4. Optionally attach local macOS pkg(s) from dist/
+  5. Create GitHub release for existing tag
 EOF
 }
 
@@ -55,6 +71,47 @@ die() {
 require_command() {
     local command_name=$1
     command -v "$command_name" >/dev/null 2>&1 || die "Missing required command: ${command_name}"
+}
+
+ensure_gh_ready() {
+    require_command gh
+    gh auth status >/dev/null 2>&1 || die 'GitHub CLI not authenticated. Run gh auth login.'
+}
+
+is_github_remote_url() {
+    local url=$1
+    [[ "$url" == *'github.com:'* || "$url" == *'github.com/'* ]]
+}
+
+resolve_github_remote() {
+    local preferred_remote=${1:-}
+    local remote url
+
+    if [[ -n "$preferred_remote" ]]; then
+        url="$(git remote get-url "$preferred_remote" 2>/dev/null || true)"
+        if is_github_remote_url "$url"; then
+            printf '%s\n' "$preferred_remote"
+            return 0
+        fi
+    fi
+
+    if git remote get-url github >/dev/null 2>&1; then
+        url="$(git remote get-url github)"
+        if is_github_remote_url "$url"; then
+            printf 'github\n'
+            return 0
+        fi
+    fi
+
+    while IFS= read -r remote; do
+        url="$(git remote get-url "$remote" 2>/dev/null || true)"
+        if is_github_remote_url "$url"; then
+            printf '%s\n' "$remote"
+            return 0
+        fi
+    done < <(git remote)
+
+    return 1
 }
 
 validate_semver() {
@@ -228,6 +285,98 @@ note_line() {
     fi
 }
 
+reset_release_notes() {
+    breaking_notes=()
+    feature_notes=()
+    fix_notes=()
+    perf_notes=()
+    refactor_notes=()
+    docs_notes=()
+    build_notes=()
+    ci_notes=()
+    test_notes=()
+    chore_notes=()
+    revert_notes=()
+    other_notes=()
+}
+
+populate_release_notes_from_commit_range() {
+    local commit_range=$1
+    local release_level='patch'
+    local local_short_sha raw_type scope bang description type line has_breaking_body
+
+    reset_release_notes
+
+    while IFS= read -r -d '' sha && IFS= read -r -d '' subject && IFS= read -r -d '' body; do
+        local_short_sha="${sha:0:7}"
+        if [[ "$subject" =~ $conventional_commit_regex ]]; then
+            raw_type="${BASH_REMATCH[1]}"
+            scope="${BASH_REMATCH[3]}"
+            bang="${BASH_REMATCH[4]}"
+            description="${BASH_REMATCH[5]}"
+            type="$(printf '%s' "$raw_type" | tr '[:upper:]' '[:lower:]')"
+            line="$(note_line "$description" "$scope" "$local_short_sha")"
+
+            case "$body" in
+                *"BREAKING CHANGE:"*|*"BREAKING-CHANGE:"*)
+                    has_breaking_body=1
+                    ;;
+                *)
+                    has_breaking_body=0
+                    ;;
+            esac
+
+            if [[ -n "$bang" || "$has_breaking_body" == '1' ]]; then
+                breaking_notes+=("$line")
+                release_level='major'
+            fi
+
+            case "$type" in
+                feat)
+                    feature_notes+=("$line")
+                    if [[ "$release_level" != 'major' ]]; then
+                        release_level='minor'
+                    fi
+                    ;;
+                fix)
+                    fix_notes+=("$line")
+                    ;;
+                perf)
+                    perf_notes+=("$line")
+                    ;;
+                refactor)
+                    refactor_notes+=("$line")
+                    ;;
+                docs)
+                    docs_notes+=("$line")
+                    ;;
+                build)
+                    build_notes+=("$line")
+                    ;;
+                ci)
+                    ci_notes+=("$line")
+                    ;;
+                test)
+                    test_notes+=("$line")
+                    ;;
+                chore)
+                    chore_notes+=("$line")
+                    ;;
+                revert)
+                    revert_notes+=("$line")
+                    ;;
+                *)
+                    other_notes+=("- ${subject} (\`${local_short_sha}\`)")
+                    ;;
+            esac
+        else
+            other_notes+=("- ${subject} (\`${local_short_sha}\`)")
+        fi
+    done < <(git log "$commit_range" --no-merges --reverse --format='%H%x00%s%x00%b%x00')
+
+    printf '%s\n' "$release_level"
+}
+
 render_section() {
     local output_path=$1
     local title=$2
@@ -331,8 +480,99 @@ update_cargo_lock_version() {
     mv "$temp_file" "$CARGO_LOCK"
 }
 
+resolve_previous_release_tag() {
+    local ref=$1
+    git describe --tags --abbrev=0 --match 'v[0-9]*' "${ref}^" 2>/dev/null || true
+}
+
+resolve_release_repo_slug() {
+    gh repo view --json nameWithOwner --jq '.nameWithOwner'
+}
+
+wait_for_linux_packages_run() {
+    local repo_slug=$1
+    local head_sha=$2
+    local started_at=$3
+    local attempt=0
+    local run_id=''
+
+    while [[ -z "$run_id" ]]; do
+        run_id="$({
+            gh api "repos/${repo_slug}/actions/workflows/${LINUX_WORKFLOW_FILE}/runs?event=push&head_sha=${head_sha}&per_page=20" \
+                --jq ".workflow_runs | map(select(.created_at >= \"${started_at}\")) | sort_by(.created_at) | reverse | .[0].id // empty"
+        } || true)"
+
+        if [[ -n "$run_id" ]]; then
+            printf '%s\n' "$run_id"
+            return 0
+        fi
+
+        attempt=$((attempt + 1))
+        if (( attempt >= WORKFLOW_START_POLL_ATTEMPTS )); then
+            die 'Timed out waiting for Linux Packages workflow to start on GitHub.'
+        fi
+
+        sleep "$WORKFLOW_START_POLL_INTERVAL_SEC"
+    done
+}
+
+download_linux_release_artifacts() {
+    local repo_slug=$1
+    local run_id=$2
+    local output_dir=$3
+
+    gh run watch "$run_id" --repo "$repo_slug" --exit-status
+    gh run download "$run_id" --repo "$repo_slug" --dir "$output_dir"
+}
+
+collect_linux_release_assets() {
+    local artifact_dir=$1
+    local path
+
+    release_assets=()
+    while IFS= read -r -d '' path; do
+        release_assets+=("$path")
+    done < <(find "$artifact_dir" -type f \( -name '*.deb' -o -name '*.AppImage' \) -print0)
+
+    if [[ "${#release_assets[@]}" -eq 0 ]]; then
+        die 'No Linux release artifacts downloaded from GitHub workflow.'
+    fi
+}
+
+collect_local_macos_pkg_candidates() {
+    local version=$1
+    local path
+
+    local_macos_pkg_candidates=()
+    for path in "${ROOT_DIR}/dist"/neomist-"${version}"-macos-*.pkg; do
+        [[ -f "$path" ]] || continue
+        local_macos_pkg_candidates+=("$path")
+    done
+}
+
+create_github_release() {
+    local repo_slug=$1
+    local release_tag=$2
+    local notes_path=$3
+
+    if gh release view "$release_tag" --repo "$repo_slug" >/dev/null 2>&1; then
+        die "GitHub release already exists: ${release_tag}"
+    fi
+
+    printf 'Creating GitHub release %s on %s...\n' "$release_tag" "$repo_slug"
+    gh release create "$release_tag" "${release_assets[@]}" --repo "$repo_slug" --title "$release_tag" --notes-file "$notes_path"
+    printf 'GitHub release created: %s\n' "$release_tag"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --backfill)
+            if [[ $# -lt 2 ]]; then
+                die 'Missing value for --backfill'
+            fi
+            BACKFILL_VERSION="$2"
+            shift
+            ;;
         --dry-run)
             DRY_RUN=1
             ;;
@@ -354,6 +594,94 @@ require_command awk
 [[ -f "$CARGO_LOCK" ]] || die "Missing file: ${CARGO_LOCK}"
 
 cd "$ROOT_DIR"
+
+if [[ -n "$BACKFILL_VERSION" ]]; then
+    backfill_version="${BACKFILL_VERSION#v}"
+    validate_semver "$backfill_version" || die "Backfill version is not semantic: ${BACKFILL_VERSION}"
+
+    ensure_gh_ready
+    github_remote="$(resolve_github_remote)" || die 'No GitHub remote found in this repository.'
+    git fetch "$github_remote" --tags >/dev/null
+
+    release_repo_slug="$(resolve_release_repo_slug)"
+    release_version="$backfill_version"
+    release_tag="v${release_version}"
+    git rev-parse -q --verify "refs/tags/${release_tag}" >/dev/null 2>&1 || die "Missing local tag: ${release_tag}"
+
+    previous_tag="$(resolve_previous_release_tag "$release_tag")"
+    commit_range="$release_tag"
+    if [[ -n "$previous_tag" ]]; then
+        commit_range="${previous_tag}..${release_tag}"
+    fi
+
+    commit_count="$(git rev-list --count --no-merges "$commit_range")"
+    release_level="$(populate_release_notes_from_commit_range "$commit_range")"
+    release_commit_sha="$(git rev-list -n 1 "$release_tag")"
+
+    notes_file="$(mktemp "${TMPDIR:-/tmp}/neomist-release-notes.XXXXXX")"
+    release_artifact_dir=''
+    cleanup() {
+        rm -f "$notes_file"
+        rm -rf "$release_artifact_dir"
+    }
+    trap cleanup EXIT
+
+    write_release_notes "$notes_file" "$release_version" "$previous_tag" "$commit_count"
+
+    printf 'Backfill release version: %s\n' "$release_version"
+    printf 'Release tag: %s\n' "$release_tag"
+    if [[ -n "$previous_tag" ]]; then
+        printf 'Previous tag: %s\n' "$previous_tag"
+    fi
+    printf 'Detected bump in notes: %s\n\n' "$release_level"
+
+    cat "$notes_file"
+    printf '\n'
+
+    collect_local_macos_pkg_candidates "$release_version"
+    selected_macos_assets=()
+    if [[ "${#local_macos_pkg_candidates[@]}" -gt 0 ]]; then
+        printf 'Found local macOS pkg(s):\n'
+        for candidate_path in "${local_macos_pkg_candidates[@]}"; do
+            printf '  %s\n' "$candidate_path"
+        done
+        printf '\n'
+
+        if prompt_yes_no 'Include local macOS pkg(s) in GitHub release?' 'y'; then
+            selected_macos_assets=("${local_macos_pkg_candidates[@]}")
+        fi
+    else
+        printf 'No local macOS pkg found in dist/ for %s.\n\n' "$release_version"
+    fi
+
+    if ! prompt_yes_no "Proceed with GitHub release backfill ${release_tag}?" 'n'; then
+        printf 'Backfill cancelled.\n'
+        exit 0
+    fi
+
+    if [[ "$DRY_RUN" == '1' ]]; then
+        printf 'Dry run. No git changes or GitHub release created.\n'
+        printf 'Would download existing GitHub workflow %s artifacts for %s and create GitHub release %s.\n' "$LINUX_WORKFLOW_FILE" "$release_tag" "$release_tag"
+        if [[ "${#selected_macos_assets[@]}" -gt 0 ]]; then
+            printf 'Would attach %s local macOS pkg artifact(s).\n' "${#selected_macos_assets[@]}"
+        fi
+        exit 0
+    fi
+
+    release_artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/neomist-release-assets.XXXXXX")"
+    printf 'Resolving existing GitHub workflow %s run for %s...\n' "$LINUX_WORKFLOW_FILE" "$release_tag"
+    linux_run_id="$(wait_for_linux_packages_run "$release_repo_slug" "$release_commit_sha" '1970-01-01T00:00:00Z')"
+    download_linux_release_artifacts "$release_repo_slug" "$linux_run_id" "$release_artifact_dir"
+    collect_linux_release_assets "$release_artifact_dir"
+
+    if [[ "${#selected_macos_assets[@]}" -gt 0 ]]; then
+        release_assets+=("${selected_macos_assets[@]}")
+    fi
+
+    create_github_release "$release_repo_slug" "$release_tag" "$notes_file"
+    exit 0
+fi
+
 ensure_clean_worktree
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -364,6 +692,9 @@ upstream_ref="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/nu
 
 upstream_remote="${upstream_ref%%/*}"
 upstream_branch="${upstream_ref#*/}"
+upstream_remote_url="$(git remote get-url "$upstream_remote" 2>/dev/null || true)"
+
+is_github_remote_url "$upstream_remote_url" || die "Current upstream remote ${upstream_remote} is not GitHub. Set branch upstream to GitHub remote before release."
 
 git fetch "$upstream_remote" --tags >/dev/null
 
@@ -396,73 +727,7 @@ if [[ "$commit_count" == "0" ]]; then
     die 'No non-merge commits to release.'
 fi
 
-release_level='patch'
-while IFS= read -r -d '' sha && IFS= read -r -d '' subject && IFS= read -r -d '' body; do
-    local_short_sha="${sha:0:7}"
-    if [[ "$subject" =~ $conventional_commit_regex ]]; then
-        raw_type="${BASH_REMATCH[1]}"
-        scope="${BASH_REMATCH[3]}"
-        bang="${BASH_REMATCH[4]}"
-        description="${BASH_REMATCH[5]}"
-        type="$(printf '%s' "$raw_type" | tr '[:upper:]' '[:lower:]')"
-        line="$(note_line "$description" "$scope" "$local_short_sha")"
-
-        case "$body" in
-            *"BREAKING CHANGE:"*|*"BREAKING-CHANGE:"*)
-                has_breaking_body=1
-                ;;
-            *)
-                has_breaking_body=0
-                ;;
-        esac
-
-        if [[ -n "$bang" || "$has_breaking_body" == '1' ]]; then
-            breaking_notes+=("$line")
-            release_level='major'
-        fi
-
-        case "$type" in
-            feat)
-                feature_notes+=("$line")
-                if [[ "$release_level" != 'major' ]]; then
-                    release_level='minor'
-                fi
-                ;;
-            fix)
-                fix_notes+=("$line")
-                ;;
-            perf)
-                perf_notes+=("$line")
-                ;;
-            refactor)
-                refactor_notes+=("$line")
-                ;;
-            docs)
-                docs_notes+=("$line")
-                ;;
-            build)
-                build_notes+=("$line")
-                ;;
-            ci)
-                ci_notes+=("$line")
-                ;;
-            test)
-                test_notes+=("$line")
-                ;;
-            chore)
-                chore_notes+=("$line")
-                ;;
-            revert)
-                revert_notes+=("$line")
-                ;;
-            *)
-                other_notes+=("- ${subject} (\`${local_short_sha}\`)")
-                ;;
-        esac
-    else
-        other_notes+=("- ${subject} (`${local_short_sha}`)")
-    fi
-done < <(git log "$commit_range" --no-merges --reverse --format='%H%x00%s%x00%b%x00')
+release_level="$(populate_release_notes_from_commit_range "$commit_range")"
 
 derived_version="$(semver_bump "$base_version" "$release_level")"
 suggested_version="$(max_semver "$current_version" "$derived_version")"
@@ -511,8 +776,12 @@ if [[ "$DRY_RUN" == '1' ]]; then
     fi
     printf 'Would create annotated tag: %s\n' "$release_tag"
     printf 'Would push branch to %s/%s and push tag %s.\n' "$upstream_remote" "$upstream_branch" "$release_tag"
+    printf 'Would wait for GitHub workflow %s, download Linux artifacts, and create GitHub release %s.\n' "$LINUX_WORKFLOW_FILE" "$release_tag"
     exit 0
 fi
+
+ensure_gh_ready
+release_repo_slug="$(resolve_release_repo_slug)"
 
 if [[ "$release_version" != "$current_version" ]]; then
     update_cargo_toml_version "$release_version"
@@ -523,53 +792,75 @@ else
     printf 'Current version already %s. Skipping release version commit.\n' "$release_version"
 fi
 
+release_commit_sha="$(git rev-parse HEAD)"
+release_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 git tag -a "$release_tag" -F "$notes_file"
 git push "$upstream_remote" "HEAD:refs/heads/${upstream_branch}"
 git push "$upstream_remote" "refs/tags/${release_tag}"
 
 printf 'Pushed branch and tag to %s. Tag push should trigger Linux Packages.\n' "$upstream_remote"
 
-if [[ "$(uname -s)" != 'Darwin' ]]; then
+macos_pkg_path=''
+if [[ "$(uname -s)" == 'Darwin' ]]; then
+    if prompt_yes_no 'Build macOS pkg now?' 'n'; then
+        sign_pkg=0
+        notarize_pkg=0
+        sign_default='n'
+        if [[ -n "${NEOMIST_APP_SIGN_IDENTITY:-}" && -n "${NEOMIST_INSTALLER_SIGN_IDENTITY:-}" ]]; then
+            sign_default='y'
+        fi
+
+        if prompt_yes_no 'Sign macOS pkg?' "$sign_default"; then
+            sign_pkg=1
+        fi
+
+        if prompt_yes_no 'Notarize macOS pkg after build?' 'n'; then
+            notarize_pkg=1
+            sign_pkg=1
+        fi
+
+        if [[ "$sign_pkg" == '1' ]]; then
+            [[ -n "${NEOMIST_APP_SIGN_IDENTITY:-}" ]] || die 'Signed macOS pkg requires NEOMIST_APP_SIGN_IDENTITY.'
+            [[ -n "${NEOMIST_INSTALLER_SIGN_IDENTITY:-}" ]] || die 'Signed macOS pkg requires NEOMIST_INSTALLER_SIGN_IDENTITY.'
+        fi
+
+        if [[ "$notarize_pkg" == '1' ]]; then
+            [[ -n "${NEOMIST_NOTARY_PROFILE:-}" ]] || die 'Notarization requires NEOMIST_NOTARY_PROFILE.'
+        fi
+
+        macos_args=()
+        if [[ "$sign_pkg" == '1' ]]; then
+            macos_args+=(--sign)
+        fi
+
+        "${ROOT_DIR}/scripts/build-macos-pkg.sh" "${macos_args[@]}"
+        if [[ "$notarize_pkg" == '1' ]]; then
+            "${ROOT_DIR}/scripts/notarize-macos-pkg.sh"
+        fi
+
+        macos_pkg_path="${ROOT_DIR}/dist/neomist-${release_version}-macos-$(uname -m).pkg"
+        [[ -f "$macos_pkg_path" ]] || die "Missing built macOS pkg: ${macos_pkg_path}"
+    else
+        printf 'macOS packaging skipped.\n'
+    fi
+else
     printf 'macOS packaging skipped: host is %s.\n' "$(uname -s)"
-    exit 0
 fi
 
-if ! prompt_yes_no 'Build macOS pkg now?' 'n'; then
-    printf 'macOS packaging skipped.\n'
-    exit 0
+release_artifact_dir="$(mktemp -d "${TMPDIR:-/tmp}/neomist-release-assets.XXXXXX")"
+cleanup() {
+    rm -f "$notes_file"
+    rm -rf "$release_artifact_dir"
+}
+trap cleanup EXIT
+
+printf 'Waiting for GitHub workflow %s to finish...\n' "$LINUX_WORKFLOW_FILE"
+linux_run_id="$(wait_for_linux_packages_run "$release_repo_slug" "$release_commit_sha" "$release_started_at")"
+download_linux_release_artifacts "$release_repo_slug" "$linux_run_id" "$release_artifact_dir"
+collect_linux_release_assets "$release_artifact_dir"
+
+if [[ -n "$macos_pkg_path" ]]; then
+    release_assets+=("$macos_pkg_path")
 fi
 
-sign_pkg=0
-notarize_pkg=0
-sign_default='n'
-if [[ -n "${NEOMIST_APP_SIGN_IDENTITY:-}" && -n "${NEOMIST_INSTALLER_SIGN_IDENTITY:-}" ]]; then
-    sign_default='y'
-fi
-
-if prompt_yes_no 'Sign macOS pkg?' "$sign_default"; then
-    sign_pkg=1
-fi
-
-if prompt_yes_no 'Notarize macOS pkg after build?' 'n'; then
-    notarize_pkg=1
-    sign_pkg=1
-fi
-
-if [[ "$sign_pkg" == '1' ]]; then
-    [[ -n "${NEOMIST_APP_SIGN_IDENTITY:-}" ]] || die 'Signed macOS pkg requires NEOMIST_APP_SIGN_IDENTITY.'
-    [[ -n "${NEOMIST_INSTALLER_SIGN_IDENTITY:-}" ]] || die 'Signed macOS pkg requires NEOMIST_INSTALLER_SIGN_IDENTITY.'
-fi
-
-if [[ "$notarize_pkg" == '1' ]]; then
-    [[ -n "${NEOMIST_NOTARY_PROFILE:-}" ]] || die 'Notarization requires NEOMIST_NOTARY_PROFILE.'
-fi
-
-macos_args=()
-if [[ "$sign_pkg" == '1' ]]; then
-    macos_args+=(--sign)
-fi
-
-"${ROOT_DIR}/scripts/build-macos-pkg.sh" "${macos_args[@]}"
-if [[ "$notarize_pkg" == '1' ]]; then
-    "${ROOT_DIR}/scripts/notarize-macos-pkg.sh"
-fi
+create_github_release "$release_repo_slug" "$release_tag" "$notes_file"
