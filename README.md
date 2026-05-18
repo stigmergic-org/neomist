@@ -144,6 +144,22 @@ Trigger Linux CI release builds from Cargo version:
 3. Workflow reads `Cargo.toml`, creates `v<version>` tag, and fails if that tag already exists
 4. Workflow explicitly dispatches `Linux Packages` against that new tag
 
+## Release
+
+Run interactive release helper:
+
+```bash
+./release.sh
+```
+
+- reads commits since latest `v*` tag and groups conventional commit subjects into release notes
+- suggests next semantic version, shows notes, and asks for confirmation
+- updates `Cargo.toml` and `Cargo.lock` when version changes are needed
+- creates `chore(release): v<version>` when version files change, tags `v<version>`, and pushes current branch plus tag to upstream remote
+- tag push triggers `Linux Packages`
+- on macOS, prompts for optional signed pkg build and notarization after push
+- use `./release.sh --dry-run` to preview without changing git state
+
 Current Linux outputs:
 
 - `dist/neomist-<version>-linux-x86_64.deb`
