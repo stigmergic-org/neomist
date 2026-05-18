@@ -1,4 +1,3 @@
-import { generateFoamSvg } from '@simplepg/foam-identicon';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 const CHECKPOINT_REFRESH_MS = 60000;
@@ -8,7 +7,6 @@ const DELEGATED_ROUTING_PROVIDERS_BASE = 'https://delegated-ipfs.dev/routing/v1/
 const NEOMIST_NODE_MARKER_CID = 'bafkqaddomvxw22ltoqww433emu';
 const RECENT_STORAGE_KEY = 'neomist.recent-domains';
 const MAX_RECENT_DOMAINS = 8;
-const CHECKPOINT_ICON_SIZE = 32;
 const CHECKPOINT_EMOJI_COUNT = 5;
 const CHECKPOINT_EMOJI_ALPHABET = [
   '😀', '😁', '😂', '😃', '😄', '😅', '😆', '😉', '😊', '😋', '😌', '😍', '😎', '😏', '😐', '😒',
@@ -21,17 +19,6 @@ const CHECKPOINT_EMOJI_ALPHABET = [
   '🎵', '🎶', '🎷', '🎸', '🎹', '🎺', '🎻', '🎬', '🎮', '🎰', '🚗', '🚕', '🚙', '🚌', '🚲', '🚀',
 ];
 const CHECKPOINT_TEXT_ENCODER = new TextEncoder();
-const FOAM_PALETTE_OVERRIDES = {
-  '--color-base-content': 'oklch(var(--bc))',
-  '--color-primary': 'oklch(var(--p))',
-  '--color-secondary': 'oklch(var(--s))',
-  '--color-accent': 'oklch(var(--a))',
-  '--color-info': 'oklch(var(--in))',
-  '--color-success': 'oklch(var(--su))',
-  '--color-warning': 'oklch(var(--wa))',
-  '--color-error': 'oklch(var(--er))',
-};
-
 const PANEL_CLASS =
   'vapor-panel rounded-2xl border border-base-300/80 bg-base-100/80 shadow-sm backdrop-blur';
 const SUBTLE_PANEL_CLASS =
@@ -2258,18 +2245,6 @@ function SeedingOverviewPanel({ summary, domains, loading, error, storageUsed, n
 }
 
 function CheckpointPanel({ checkpoints, error }) {
-  const checkpointIcons = useMemo(
-    () =>
-      checkpoints.slice(0, 5).map((hash) => ({
-        hash,
-        fingerprint: formatCheckpoint(hash),
-        svg: generateFoamSvg(hash, CHECKPOINT_ICON_SIZE, {
-          paletteOverrides: FOAM_PALETTE_OVERRIDES,
-        }),
-      })),
-    [checkpoints]
-  );
-
   return (
     <section className={classNames(PANEL_CLASS, 'p-6')}>
       <h2 className="text-2xl font-semibold tracking-tight">Consensus checkpoints</h2>
@@ -2283,7 +2258,7 @@ function CheckpointPanel({ checkpoints, error }) {
         ) : checkpoints.length === 0 ? (
           <p className="text-sm leading-6 text-base-content/60">Waiting for checkpoints.</p>
         ) : (
-          checkpointIcons.map(({ hash, fingerprint, svg }) => (
+          checkpoints.slice(0, 5).map((hash) => (
             <a
               key={hash}
               href={checkpointExplorerUrl(hash)}
@@ -2296,17 +2271,7 @@ function CheckpointPanel({ checkpoints, error }) {
                 'flex items-center justify-between gap-4 px-4 py-3 text-left transition hover:border-base-content/15 hover:bg-base-100/80'
               )}
             >
-              <div className="flex items-center gap-3">
-                <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg">
-                  <span
-                    role="img"
-                    aria-hidden="true"
-                    className="inline-flex h-8 w-8 [&>svg]:h-8 [&>svg]:w-8"
-                    dangerouslySetInnerHTML={{ __html: svg }}
-                  />
-                </span>
-                <span className="text-xl leading-none sm:text-2xl">{fingerprint}</span>
-              </div>
+              <span className="text-xl leading-none sm:text-2xl">{formatCheckpoint(hash)}</span>
               <span className="text-xs text-base-content/55">Open explorer</span>
             </a>
           ))
