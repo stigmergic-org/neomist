@@ -1,6 +1,7 @@
 {
   "name": "apps.neomist.eth",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "cli": "node src/cli.mjs",

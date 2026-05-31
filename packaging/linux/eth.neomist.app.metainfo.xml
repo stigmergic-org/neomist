@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>eth.neomist.app</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>LicenseRef-proprietary</project_license>
+  <project_license>GPL-3.0-only</project_license>
   <name>NeoMist</name>
   <summary>Local-first browser companion for .eth and .wei sites</summary>
   <developer id="eth.neomist">

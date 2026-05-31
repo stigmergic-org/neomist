@@ -191,6 +191,10 @@ Current packaging ID defaults:
 
 More packaging details live in `packaging/linux/README.md`.
 
+## License
+
+NeoMist is licensed under the GNU General Public License v3.0 only. See [LICENSE](LICENSE).
+
 ## Project Layout
 
 - `src/` Rust app, DNS, TLS, ENS, IPFS, tray, and HTTP server code
